@@ -1,0 +1,332 @@
+:root {
+  --bg: #0b0d10;
+  --bg-2: #11141a;
+  --card: #161a22;
+  --card-2: #1c2230;
+  --line: #232a39;
+  --text: #e7ecf3;
+  --muted: #8a93a6;
+  --accent: #ff4500; /* reddit orange */
+  --accent-2: #ff7a3a;
+  --good: #4ade80;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.25);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background:
+    radial-gradient(1200px 600px at 80% -20%, rgba(255,69,0,0.12), transparent 60%),
+    radial-gradient(900px 500px at -10% 10%, rgba(80,120,255,0.08), transparent 60%),
+    var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(11,13,16,0.6);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 600; letter-spacing: 0.2px;
+}
+.brand-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 18px rgba(255,69,0,0.55);
+}
+.health {
+  font-size: 12px; color: var(--muted);
+  padding: 4px 10px; border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.health.ok { color: var(--good); border-color: rgba(74,222,128,0.3); }
+.health.warn { color: var(--warn); border-color: rgba(251,191,36,0.3); }
+
+main {
+  max-width: 980px;
+  margin: 28px auto 80px;
+  padding: 0 24px;
+  display: flex; flex-direction: column; gap: 22px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+.card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px;
+}
+.card-head h2 { margin: 0; font-size: 18px; }
+
+.hero h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+}
+.hero .muted { margin-top: 0; }
+
+.row { display: flex; gap: 10px; margin-top: 18px; }
+.row input[type="text"] {
+  flex: 1;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 15px;
+  outline: none;
+  transition: border-color .15s;
+}
+.row input[type="text"]:focus { border-color: var(--accent); }
+
+button {
+  background: linear-gradient(180deg, #2a3142, #1f2533);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform .04s, border-color .15s, background .15s;
+}
+button:hover:not(:disabled) { border-color: #3a4356; }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary,
+#analyze-btn {
+  background: linear-gradient(180deg, var(--accent-2), var(--accent));
+  border-color: rgba(255,69,0,0.4);
+  color: white;
+  font-weight: 600;
+}
+
+.status {
+  margin: 12px 0 0;
+  min-height: 20px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.status.error { color: var(--bad); }
+.status.ok { color: var(--good); }
+
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.hidden { display: none !important; }
+
+/* Business profile */
+.profile-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 22px;
+}
+.profile-grid .label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.profile-grid .full { grid-column: 1 / -1; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Subreddits */
+.subs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.sub {
+  position: relative;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 14px 14px 38px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.sub:hover { border-color: #3a4356; }
+.sub.selected {
+  border-color: var(--accent);
+  background: rgba(255,69,0,0.06);
+}
+.sub input {
+  position: absolute; left: 14px; top: 16px;
+  accent-color: var(--accent);
+}
+.sub .name {
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.sub .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.sub .desc {
+  font-size: 12.5px; color: #c8cfdb;
+  margin-top: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sub .strategy {
+  margin-top: 8px; font-size: 12px;
+  color: #aeb7c7; font-style: italic;
+}
+.relevance {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.relevance.high { color: var(--good); border-color: rgba(74,222,128,0.3); }
+.relevance.mid { color: var(--warn); border-color: rgba(251,191,36,0.3); }
+
+.actions {
+  margin-top: 18px;
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+
+/* Threads */
+.thread {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+  background: var(--card-2);
+}
+.thread-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.thread-title {
+  font-weight: 600; font-size: 15px;
+  margin: 0 0 4px;
+}
+.thread-title a { color: var(--text); text-decoration: none; }
+.thread-title a:hover { color: var(--accent-2); }
+.thread-meta { font-size: 12px; color: var(--muted); }
+.thread-angle {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #c8cfdb;
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
+}
+.thread-preview {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #aeb7c7;
+  white-space: pre-wrap;
+}
+.replies { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.reply {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  position: relative;
+}
+.reply .angle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 4px;
+  display: flex; justify-content: space-between;
+}
+.reply .text { white-space: pre-wrap; font-size: 14px; }
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.copy-btn:hover { color: var(--text); }
+
+/* Posts */
+.post {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+  background: var(--card-2);
+}
+.post-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  flex-wrap: wrap; gap: 8px;
+}
+.post-sub { font-size: 12px; color: var(--accent-2); font-weight: 600; }
+.post-type {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.post-title {
+  margin: 6px 0 8px; font-size: 17px; font-weight: 600;
+}
+.post-body { white-space: pre-wrap; font-size: 14px; }
+.post-meta {
+  margin-top: 10px; font-size: 12px; color: var(--muted);
+  border-top: 1px dashed var(--line); padding-top: 8px;
+}
+
+footer {
+  text-align: center;
+  padding: 24px 0 40px;
+}
+
+@media (max-width: 600px) {
+  .profile-grid { grid-template-columns: 1fr; }
+  .row { flex-direction: column; }
+  .hero h1 { font-size: 22px; }
+}
+
+/* Loading dots */
+.dots::after {
+  content: ".";
+  animation: dots 1.4s steps(4, end) infinite;
+}
+@keyframes dots {
+  0%,20% { content: "."; }
+  40% { content: ".."; }
+  60% { content: "..."; }
+  80%,100% { content: ""; }
+}
