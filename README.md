@@ -96,6 +96,43 @@ frontend/
 
 ---
 
+## Troubleshooting
+
+**Browser says "can't connect" / "site can't be reached".**
+
+The launcher now waits for the server to actually respond before
+printing `✓ site is live!`. If you don't see that line, the server
+didn't start — scroll up in the terminal, the launcher will print the
+last 25 lines of the server log so you can see why. Common causes:
+
+- **Port already in use.** `run.sh` auto-bumps to the next free port
+  (8000 → 8001 → 8002 …) and tells you in the terminal. Use the URL
+  it actually printed, not a hard-coded one.
+- **You're using the wrong URL.** The page is at the URL printed by
+  `run.sh`, e.g. `http://localhost:8001`. Don't use `0.0.0.0` in the
+  browser — try `http://localhost:PORT` or `http://127.0.0.1:PORT`.
+- **Python error during startup.** The launcher prints the traceback.
+  Most often this is a missing `OPENAI_API_KEY` (the UI loads but
+  Analyze fails) or a corrupted venv (`./run.sh --reset` rebuilds it).
+- **Running on a remote / cloud machine.** `localhost` in your browser
+  points at *your* machine, not the cloud box. Either run it on your
+  laptop, or use SSH port-forward: `ssh -L 8000:localhost:8000 user@host`
+  and then open `http://localhost:8000` locally.
+- **WSL.** The browser on Windows can usually reach
+  `http://localhost:8000` directly. If not, use the WSL IP:
+  `wsl hostname -I`.
+
+**It auto-opened the wrong browser / I closed it.** Just visit the URL
+printed in the terminal manually. You can also pass `--no-open` to
+suppress the auto-launch.
+
+**Reddit search returns nothing / 403.** Reddit blocks anonymous traffic
+from data-center IPs. Set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`
+in `backend/.env` (script-type app at <https://www.reddit.com/prefs/apps>).
+The header badge in the UI tells you which mode is active.
+
+---
+
 ## Manual setup (if you don't want to use `run.sh`)
 
 ### 1. Get the keys

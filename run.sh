@@ -139,24 +139,102 @@ if [ -z "$CURRENT_KEY" ] || [ "$CURRENT_KEY" = "sk-..." ]; then
   fi
 fi
 
-# --- 5. Start the server ---------------------------------------------------
-URL="http://localhost:${PORT}"
-say "starting server on ${BOLD}${URL}${RESET_}"
-echo "${DIM}press Ctrl-C to stop${RESET_}"
+# --- 5. Pick a free port ---------------------------------------------------
+port_is_free() {
+  python - <<PY 2>/dev/null
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("0.0.0.0", $1))
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
 
-# Try to open a browser shortly after the server is up.
-if [ "$OPEN_BROWSER" = "1" ]; then
-  (
-    sleep 1.5
-    if command -v open >/dev/null 2>&1; then
-      open "$URL" >/dev/null 2>&1 || true
-    elif command -v xdg-open >/dev/null 2>&1; then
-      xdg-open "$URL" >/dev/null 2>&1 || true
-    elif command -v wslview >/dev/null 2>&1; then
-      wslview "$URL" >/dev/null 2>&1 || true
-    fi
-  ) &
+ORIGINAL_PORT="$PORT"
+TRIES=0
+while ! port_is_free "$PORT"; do
+  TRIES=$((TRIES + 1))
+  if [ "$TRIES" -gt 25 ]; then
+    fail "couldn't find a free port near ${ORIGINAL_PORT}"
+    exit 1
+  fi
+  PORT=$((PORT + 1))
+done
+if [ "$PORT" != "$ORIGINAL_PORT" ]; then
+  warn "port ${ORIGINAL_PORT} was busy — using ${PORT} instead"
 fi
 
-cd "$SCRIPT_DIR/backend"
-exec env PORT="$PORT" python main.py
+# --- 6. Start the server ---------------------------------------------------
+URL_LOCAL="http://localhost:${PORT}"
+URL_LOOPBACK="http://127.0.0.1:${PORT}"
+LOG_FILE="$(mktemp)"
+
+cleanup() {
+  if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  rm -f "$LOG_FILE"
+}
+trap cleanup INT TERM EXIT
+
+say "starting server"
+( cd "$SCRIPT_DIR/backend" && PORT="$PORT" python main.py ) \
+  >"$LOG_FILE" 2>&1 &
+SERVER_PID=$!
+
+# Poll until /api/health responds (or the server dies).
+READY=0
+for _ in $(seq 1 60); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    break
+  fi
+  if curl -sf "${URL_LOOPBACK}/api/health" >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  sleep 0.5
+done
+
+if [ "$READY" = "0" ]; then
+  fail "server did not start. Last 25 log lines:"
+  echo "${DIM}---${RESET_}"
+  tail -n 25 "$LOG_FILE" >&2 || true
+  echo "${DIM}---${RESET_}"
+  if grep -q "address already in use" "$LOG_FILE" 2>/dev/null; then
+    warn "port ${PORT} is in use by another process. Try: PORT=$((PORT + 1)) ./run.sh"
+  fi
+  exit 1
+fi
+
+echo
+ok "site is live!"
+printf "   %s%s%s\n" "$BOLD" "$URL_LOCAL" "$RESET_"
+printf "   %s%s%s\n" "$DIM" "$URL_LOOPBACK" "$RESET_"
+echo
+echo "${DIM}press Ctrl-C to stop${RESET_}"
+echo
+
+if [ "$OPEN_BROWSER" = "1" ]; then
+  if command -v open >/dev/null 2>&1; then
+    open "$URL_LOCAL" >/dev/null 2>&1 || true
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL_LOCAL" >/dev/null 2>&1 || true
+  elif command -v wslview >/dev/null 2>&1; then
+    wslview "$URL_LOCAL" >/dev/null 2>&1 || true
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile start "$URL_LOCAL" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Stream uvicorn logs until the server exits or the user hits Ctrl-C.
+tail -n +1 -f "$LOG_FILE" &
+TAIL_PID=$!
+wait "$SERVER_PID"
+SERVER_EXIT=$?
+kill "$TAIL_PID" 2>/dev/null || true
+exit "$SERVER_EXIT"
