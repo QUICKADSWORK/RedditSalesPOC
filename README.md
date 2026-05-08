@@ -20,9 +20,59 @@ before posting.
 
 ---
 
+## Quickstart — run the local site
+
+You need Python 3.9+ and an OpenAI API key. Reddit credentials are
+optional but recommended (especially on a cloud machine).
+
+### macOS / Linux / WSL
+
+```bash
+./run.sh
+```
+
+That's it. The script will:
+
+1. Create a `.venv/` in the repo root.
+2. Install all backend dependencies.
+3. Create `backend/.env` from the template and prompt you to paste your
+   `OPENAI_API_KEY` (you can skip and edit the file later).
+4. Start the FastAPI server on <http://localhost:8000>.
+5. Open the page in your browser.
+
+Useful flags:
+
+```bash
+PORT=9000 ./run.sh     # custom port
+./run.sh --no-open     # don't auto-open the browser
+./run.sh --reset       # wipe .venv and reinstall
+```
+
+Or use `make`:
+
+```bash
+make run        # same as ./run.sh
+make dev        # with auto-reload
+make install    # just install deps
+make reset      # nuke .venv and start over
+```
+
+### Windows
+
+Double-click `run.bat`, or from a terminal:
+
+```cmd
+run.bat
+```
+
+It does the same setup and starts the server on
+<http://localhost:8000>.
+
+---
+
 ## Stack
 
-- **Backend**: Python 3.11+, FastAPI, OpenAI (chat completions),
+- **Backend**: Python 3.9+, FastAPI, OpenAI (chat completions),
   PRAW (with a graceful anonymous fallback to reddit.com JSON).
 - **Frontend**: a single static HTML/CSS/JS page served by FastAPI.
 
@@ -46,7 +96,7 @@ frontend/
 
 ---
 
-## Setup
+## Manual setup (if you don't want to use `run.sh`)
 
 ### 1. Get the keys
 

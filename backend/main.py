@@ -60,14 +60,24 @@ class PostsBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _real_key(name: str) -> bool:
+    val = (os.getenv(name) or "").strip()
+    if not val:
+        return False
+    # Common placeholders we should not treat as real.
+    if val.startswith("sk-...") or val in {"sk-...", "your-key-here", "changeme"}:
+        return False
+    return True
+
+
 @app.get("/api/health")
 def health() -> dict:
-    reddit_configured = bool(
-        os.getenv("REDDIT_CLIENT_ID") and os.getenv("REDDIT_CLIENT_SECRET")
+    reddit_configured = _real_key("REDDIT_CLIENT_ID") and _real_key(
+        "REDDIT_CLIENT_SECRET"
     )
     return {
         "ok": True,
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "openai_configured": _real_key("OPENAI_API_KEY"),
         "reddit_configured": reddit_configured,
         "reddit_anon_reachable": (
             True if reddit_configured else reddit_client.anon_reachable()
