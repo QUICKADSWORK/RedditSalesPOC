@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reddit Sales Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%23ff4500'/%3E%3Ctext x='50' y='66' text-anchor='middle' font-size='52' font-family='Arial' fill='white' font-weight='bold'%3Er%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span>Reddit Sales Agent</span>
+      </div>
+      <div id="health" class="health">checking…</div>
+    </header>
+
+    <main>
+      <section class="card hero">
+        <h1>Find Reddit threads worth your time.</h1>
+        <p class="muted">
+          Drop in your website. The agent figures out what you do, finds
+          relevant subreddits, surfaces recent threads where a helpful
+          comment would land, and drafts human-style posts &mdash; never
+          ads.
+        </p>
+        <form id="analyze-form" class="row">
+          <input
+            id="website"
+            type="text"
+            placeholder="https://yourcompany.com"
+            autocomplete="url"
+            spellcheck="false"
+            required
+          />
+          <button id="analyze-btn" type="submit">Analyze</button>
+        </form>
+        <p id="analyze-status" class="status"></p>
+      </section>
+
+      <section id="business-section" class="card hidden">
+        <div class="card-head">
+          <h2>Your business, as the agent sees it</h2>
+        </div>
+        <div id="business-body"></div>
+      </section>
+
+      <section id="subs-section" class="card hidden">
+        <div class="card-head">
+          <h2>Recommended subreddits</h2>
+          <span class="muted small">
+            Pick the ones you want to target, then run a step.
+          </span>
+        </div>
+        <div id="subs-body" class="subs"></div>
+        <div class="actions">
+          <button id="threads-btn" class="primary" disabled>
+            Find threads to comment on
+          </button>
+          <button id="posts-btn" disabled>Generate human-style posts</button>
+        </div>
+        <p id="action-status" class="status"></p>
+      </section>
+
+      <section id="threads-section" class="card hidden">
+        <div class="card-head">
+          <h2>Threads worth a comment</h2>
+        </div>
+        <div id="threads-body"></div>
+      </section>
+
+      <section id="posts-section" class="card hidden">
+        <div class="card-head">
+          <h2>Human-style post drafts</h2>
+        </div>
+        <div id="posts-body"></div>
+      </section>
+    </main>
+
+    <footer>
+      <span class="muted small">
+        POC. Always read each subreddit's rules before posting; the agent
+        suggests, you decide.
+      </span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
