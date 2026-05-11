@@ -182,9 +182,29 @@ function renderSubs(subs) {
 }
 
 function updateActionButtons() {
-  const has = state.business && state.selected.size > 0;
+  const n = state.selected.size;
+  const has = state.business && n > 0;
   $("#threads-btn").disabled = !has;
   $("#posts-btn").disabled = !has;
+
+  const counter = $("#subs-count");
+  if (!counter) return;
+  counter.classList.remove("ok", "error");
+  if (n === 0) {
+    counter.textContent = "";
+  } else if (n > 4) {
+    counter.classList.add("error");
+    counter.textContent =
+      `${n} selected · only the first 4 will be used. Untick some for best results.`;
+  } else if (n === 4) {
+    counter.classList.add("error");
+    counter.textContent =
+      `${n} selected (max). Heads-up: 1–2 subreddits scrape much faster.`;
+  } else {
+    counter.classList.add("ok");
+    counter.textContent =
+      `${n} selected · ${n <= 2 ? "great, fastest scrape" : "ok, 1–2 is fastest"}.`;
+  }
 }
 
 // ---------------------------------------------------------------------------
