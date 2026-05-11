@@ -184,7 +184,12 @@ URL_LOCAL="http://localhost:${PORT}"
 URL_LOOPBACK="http://127.0.0.1:${PORT}"
 LOG_FILE="$(mktemp)"
 
+USER_QUIT=0
 cleanup() {
+  USER_QUIT=1
+  if [ -n "${TAIL_PID:-}" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+    kill "$TAIL_PID" 2>/dev/null || true
+  fi
   if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
@@ -193,59 +198,105 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-say "starting server"
-( cd "$SCRIPT_DIR/backend" && PORT="$PORT" python main.py ) \
-  >"$LOG_FILE" 2>&1 &
-SERVER_PID=$!
-
-# Poll until /api/health responds (or the server dies).
-READY=0
-for _ in $(seq 1 60); do
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    break
-  fi
-  if curl -sf "${URL_LOOPBACK}/api/health" >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
-  sleep 0.5
-done
-
-if [ "$READY" = "0" ]; then
-  fail "server did not start. Last 25 log lines:"
-  echo "${DIM}---${RESET_}"
-  tail -n 25 "$LOG_FILE" >&2 || true
-  echo "${DIM}---${RESET_}"
-  if grep -q "address already in use" "$LOG_FILE" 2>/dev/null; then
-    warn "port ${PORT} is in use by another process. Try: PORT=$((PORT + 1)) ./run.sh"
-  fi
-  exit 1
-fi
-
-echo
-ok "site is live!"
-printf "   %s%s%s\n" "$BOLD" "$URL_LOCAL" "$RESET_"
-printf "   %s%s%s\n" "$DIM" "$URL_LOOPBACK" "$RESET_"
-echo
-echo "${DIM}press Ctrl-C to stop${RESET_}"
-echo
-
-if [ "$OPEN_BROWSER" = "1" ]; then
-  if command -v open >/dev/null 2>&1; then
-    open "$URL_LOCAL" >/dev/null 2>&1 || true
-  elif command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$URL_LOCAL" >/dev/null 2>&1 || true
-  elif command -v wslview >/dev/null 2>&1; then
-    wslview "$URL_LOCAL" >/dev/null 2>&1 || true
-  elif command -v powershell.exe >/dev/null 2>&1; then
-    powershell.exe -NoProfile start "$URL_LOCAL" >/dev/null 2>&1 || true
-  fi
-fi
-
-# Stream uvicorn logs until the server exits or the user hits Ctrl-C.
+# Stream the log to the user in the background.
+: > "$LOG_FILE"
 tail -n +1 -f "$LOG_FILE" &
 TAIL_PID=$!
-wait "$SERVER_PID"
-SERVER_EXIT=$?
-kill "$TAIL_PID" 2>/dev/null || true
-exit "$SERVER_EXIT"
+
+ATTEMPT=0
+LAST_START=0
+RESTART_FAILS=0
+
+say "starting server"
+
+while true; do
+  ATTEMPT=$((ATTEMPT + 1))
+  LAST_START=$(date +%s)
+  ( cd "$SCRIPT_DIR/backend" && PORT="$PORT" python main.py ) \
+    >>"$LOG_FILE" 2>&1 &
+  SERVER_PID=$!
+
+  # Poll until /api/health responds (or the server dies).
+  READY=0
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      break
+    fi
+    if curl -sf "${URL_LOOPBACK}/api/health" >/dev/null 2>&1; then
+      READY=1
+      break
+    fi
+    sleep 0.5
+  done
+
+  if [ "$READY" = "1" ]; then
+    if [ "$ATTEMPT" = "1" ]; then
+      echo
+      ok "site is live!"
+      printf "   %s%s%s\n" "$BOLD" "$URL_LOCAL" "$RESET_"
+      printf "   %s%s%s\n" "$DIM" "$URL_LOOPBACK" "$RESET_"
+      echo
+      echo "${DIM}press Ctrl-C to stop${RESET_}"
+      echo
+      if [ "$OPEN_BROWSER" = "1" ]; then
+        if command -v open >/dev/null 2>&1; then
+          open "$URL_LOCAL" >/dev/null 2>&1 || true
+        elif command -v xdg-open >/dev/null 2>&1; then
+          xdg-open "$URL_LOCAL" >/dev/null 2>&1 || true
+        elif command -v wslview >/dev/null 2>&1; then
+          wslview "$URL_LOCAL" >/dev/null 2>&1 || true
+        elif command -v powershell.exe >/dev/null 2>&1; then
+          powershell.exe -NoProfile start "$URL_LOCAL" >/dev/null 2>&1 || true
+        fi
+      fi
+    else
+      ok "server back up at $URL_LOCAL (restart #$((ATTEMPT - 1)))"
+    fi
+    RESTART_FAILS=0
+  else
+    if [ "$ATTEMPT" = "1" ]; then
+      fail "server did not start. Last 25 log lines:"
+      echo "${DIM}---${RESET_}"
+      tail -n 25 "$LOG_FILE" >&2 || true
+      echo "${DIM}---${RESET_}"
+      if grep -q "address already in use" "$LOG_FILE" 2>/dev/null; then
+        warn "port ${PORT} is in use. Try: PORT=$((PORT + 1)) ./run.sh"
+      fi
+      USER_QUIT=1
+      break
+    fi
+    RESTART_FAILS=$((RESTART_FAILS + 1))
+    warn "server failed to come up on restart attempt #$((ATTEMPT - 1))"
+  fi
+
+  # `wait` returns the server's exit code, which can be non-zero when
+  # killed; that's expected here and must not trigger `set -e`.
+  SERVER_EXIT=0
+  wait "$SERVER_PID" || SERVER_EXIT=$?
+
+  if [ "$USER_QUIT" = "1" ]; then
+    break
+  fi
+
+  # If the server stayed up <5 s and this is our 4th-in-a-row quick crash,
+  # give up so we don't loop forever in a broken state.
+  NOW=$(date +%s)
+  UPTIME=$((NOW - LAST_START))
+  if [ "$UPTIME" -lt 5 ]; then
+    RESTART_FAILS=$((RESTART_FAILS + 1))
+    if [ "$RESTART_FAILS" -ge 4 ]; then
+      fail "server keeps crashing within ${UPTIME}s of startup; giving up. Last log lines:"
+      echo "${DIM}---${RESET_}"
+      tail -n 30 "$LOG_FILE" >&2 || true
+      echo "${DIM}---${RESET_}"
+      exit "$SERVER_EXIT"
+    fi
+  else
+    RESTART_FAILS=0
+  fi
+
+  warn "server exited (code ${SERVER_EXIT}) after ${UPTIME}s — restarting in 1 s…"
+  sleep 1
+done
+
+exit 0

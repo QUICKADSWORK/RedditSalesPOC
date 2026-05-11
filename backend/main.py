@@ -4,10 +4,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import logging
+import traceback
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -30,6 +33,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_logger = logging.getLogger("reddit-sales-poc")
+
+
+@app.exception_handler(Exception)
+async def _last_resort_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch any exception that slipped past per-route try/except so a
+    single failing request can never kill the process. The full
+    traceback is still printed to the server terminal."""
+    _logger.error("unhandled exception on %s %s", request.method, request.url.path)
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {exc}",
+            "where": f"{request.method} {request.url.path}",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
