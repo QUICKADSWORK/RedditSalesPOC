@@ -120,10 +120,10 @@ def health() -> dict:
 
 @app.post("/api/analyze")
 def analyze(body: AnalyzeBody) -> dict:
-    try:
-        site = website_mod.fetch_site_text(body.website_url)
-    except Exception as exc:
-        raise HTTPException(400, f"Could not fetch website: {exc}") from exc
+    # Never raise on fetch -- big sites (Udemy, anything behind
+    # Cloudflare) often block plain HTTP clients. The LLM can still
+    # profile well-known domains from its own knowledge.
+    site = website_mod.fetch_site_text_or_stub(body.website_url)
     try:
         profile = website_mod.build_business_profile(site)
     except Exception as exc:

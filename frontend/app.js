@@ -80,6 +80,13 @@ function renderBusiness(b) {
   const body = $("#business-body");
   body.innerHTML = "";
 
+  if (b.fetch_warning) {
+    const note = el("div", "fetch-warning");
+    note.innerHTML =
+      `<strong>Heads up:</strong> ${escape(b.fetch_warning)}`;
+    body.appendChild(note);
+  }
+
   const grid = el("div", "profile-grid");
 
   grid.appendChild(field("Name", b.name || "—"));
