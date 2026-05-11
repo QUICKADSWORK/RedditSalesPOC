@@ -216,7 +216,36 @@ def _apify_actor() -> str:
 
 
 def _apify_token() -> str:
-    return os.environ["APIFY_TOKEN"]
+    """Return the Apify API token, tolerating a few common copy-paste
+    mistakes (pasting the full sample URL, leading/trailing spaces,
+    surrounding quotes)."""
+    raw = (os.environ.get("APIFY_TOKEN") or "").strip().strip('"').strip("'")
+    if not raw:
+        raise RuntimeError(
+            "APIFY_TOKEN is not set. Add it in Render env vars (or "
+            "backend/.env locally). It should look like "
+            "'apify_api_XXXXXXXXXXXXXX'."
+        )
+    # If the user pasted the full sample URL (with token=... inside),
+    # extract the token portion so we don't ship it as the query value
+    # of another URL.
+    if "://" in raw and "token=" in raw:
+        try:
+            from urllib.parse import urlparse, parse_qs
+
+            qs = parse_qs(urlparse(raw).query)
+            tok = (qs.get("token") or [""])[0]
+            if tok.startswith("apify_api_"):
+                return tok
+        except Exception:
+            pass
+    if not raw.startswith("apify_api_"):
+        raise RuntimeError(
+            f"APIFY_TOKEN doesn't look like an Apify token "
+            f"(starts with {raw[:12]!r}, expected 'apify_api_...'). "
+            "Paste only the token, not the full API URL."
+        )
+    return raw
 
 
 def _apify_run(

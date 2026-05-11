@@ -89,12 +89,27 @@ def chat_json(system: str, user: str, *, temperature: float = 0.4) -> Any:
 _anthropic_client = None
 
 
+def _clean_key(env_name: str, prefix: str) -> str:
+    raw = (os.environ.get(env_name) or "").strip().strip('"').strip("'")
+    if not raw:
+        raise RuntimeError(f"{env_name} is not set.")
+    if not raw.startswith(prefix):
+        raise RuntimeError(
+            f"{env_name} doesn't look right (starts with {raw[:6]!r}, "
+            f"expected '{prefix}...'). Paste only the key itself, not "
+            "a URL or anything around it."
+        )
+    return raw
+
+
 def _get_anthropic():
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import Anthropic  # local import keeps cold path cheap
 
-        _anthropic_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        _anthropic_client = Anthropic(
+            api_key=_clean_key("ANTHROPIC_API_KEY", "sk-ant-")
+        )
     return _anthropic_client
 
 
@@ -158,7 +173,7 @@ def _get_openai():
         from openai import OpenAI
 
         _openai_client = OpenAI(
-            api_key=os.environ["OPENAI_API_KEY"],
+            api_key=_clean_key("OPENAI_API_KEY", "sk-"),
             base_url=os.getenv("OPENAI_BASE_URL") or None,
         )
     return _openai_client
