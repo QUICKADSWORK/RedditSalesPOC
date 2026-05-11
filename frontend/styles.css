@@ -123,6 +123,12 @@ button.primary,
   color: white;
   font-weight: 600;
 }
+button.danger {
+  background: linear-gradient(180deg, #b34141, #8d2e2e);
+  border-color: rgba(248,113,113,0.4);
+  color: white;
+  font-weight: 600;
+}
 
 .status {
   margin: 12px 0 0;

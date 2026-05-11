@@ -107,12 +107,17 @@ def bulk_recent_threads(
     *,
     include_comments: bool = False,
     comments_per_post: int = 6,
+    on_status=None,
+    cancel_event=None,
+    max_wait: float = 120.0,
 ) -> tuple[list[dict], dict[str, list[str]]]:
     """Return (posts, comments_by_post_id).
 
-    In Apify mode with include_comments=True this is a single API call
-    that returns both. PRAW/anon modes do post-listing only here and
-    will fetch comments on demand via bulk_post_comments.
+    `on_status({"status": str, "run_id": str})` is called with the
+    actor's real status as it changes. `cancel_event` is a
+    threading.Event; if set, we'll abort the Apify run and return
+    early. `max_wait` is how long we'll wait for the actor before
+    giving up and aborting it.
     """
     subs = [_clean_sub(s) for s in subreddits if s]
     if not subs:
@@ -124,6 +129,9 @@ def bulk_recent_threads(
             per_sub,
             include_comments=include_comments,
             comments_per_post=comments_per_post,
+            on_status=on_status,
+            cancel_event=cancel_event,
+            max_wait=max_wait,
         )
     posts: list[dict] = []
     for s in subs:
@@ -212,20 +220,37 @@ def _apify_token() -> str:
 
 
 def _apify_run(
-    payload: dict, *, max_wait: float = 600.0, poll_interval: float = 4.0
+    payload: dict,
+    *,
+    max_wait: float = 120.0,
+    poll_interval: float = 3.0,
+    on_status: "callable | None" = None,
+    cancel_event: "threading.Event | None" = None,
 ) -> list[dict]:
     """Kick off an actor run, poll until it finishes, return dataset items.
 
     We deliberately avoid `run-sync-get-dataset-items` because Apify
-    hard-caps that endpoint at 300 seconds, regardless of the client's
-    HTTP timeout. The async pattern (POST /runs -> poll /actor-runs/ID
-    -> GET /datasets/ID/items) has no such limit and is robust to
-    actor runs that take several minutes.
+    hard-caps that endpoint at 300 s. The async pattern (POST /runs ->
+    poll /actor-runs/ID -> GET /datasets/ID/items) has no such limit.
+
+    Important: we *abort* the Apify run if we hit max_wait or if the
+    caller signals via `cancel_event`, so the user isn't charged for a
+    run we no longer care about.
+
+    `on_status(state)` is called whenever we learn something new about
+    the run (READY -> RUNNING -> ...), useful for surfacing real
+    progress in a UI.
     """
+    import threading as _threading
+
     token = _apify_token()
     actor = _apify_actor()
     headers = {"Content-Type": "application/json"}
-    with httpx.Client(timeout=60.0) as c:
+
+    def _cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    with httpx.Client(timeout=30.0) as c:
         # 1. Start the run.
         start = c.post(
             f"{_APIFY_BASE}/acts/{actor}/runs?token={token}",
@@ -238,39 +263,69 @@ def _apify_run(
         dataset_id = run.get("defaultDatasetId")
         if not run_id or not dataset_id:
             return []
+        if on_status:
+            try:
+                on_status({"status": run.get("status", "READY"), "run_id": run_id})
+            except Exception:
+                pass
 
-        # 2. Poll until terminal status.
+        # 2. Poll until terminal status, our timeout, or cancellation.
         deadline = time.time() + max_wait
         status = run.get("status", "READY")
         terminal = {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}
+        timed_out = False
         while status not in terminal:
+            if _cancelled():
+                break
             if time.time() > deadline:
+                timed_out = True
                 break
             time.sleep(poll_interval)
             try:
                 s = c.get(f"{_APIFY_BASE}/actor-runs/{run_id}?token={token}")
                 s.raise_for_status()
-                status = (s.json().get("data") or {}).get("status", status)
+                new_status = (s.json().get("data") or {}).get("status", status)
+                if new_status != status and on_status:
+                    try:
+                        on_status({"status": new_status, "run_id": run_id})
+                    except Exception:
+                        pass
+                status = new_status
             except Exception:
                 continue
 
-        # 3. Fetch dataset items. Apify can report SUCCEEDED before the
-        # final flush of items, so we poll briefly until items appear
-        # (or give up after a few seconds and return what we have).
+        # 3. If we gave up before the actor finished, abort it server-
+        # side so the user isn't billed for the rest of the run.
+        if timed_out or (_cancelled() and status not in terminal):
+            try:
+                c.post(
+                    f"{_APIFY_BASE}/actor-runs/{run_id}/abort?token={token}"
+                )
+            except Exception:
+                pass
+            if on_status:
+                try:
+                    on_status({"status": "ABORTED_BY_AGENT", "run_id": run_id})
+                except Exception:
+                    pass
+            return []
+
+        # 4. Fetch dataset items. The dataset can lag the run status
+        # by a few seconds, so we poll briefly for the flush.
         items_url = (
             f"{_APIFY_BASE}/datasets/{dataset_id}/items"
             f"?token={token}&format=json"
         )
         data: list = []
-        flush_deadline = time.time() + 30.0
-        while time.time() < flush_deadline:
+        flush_deadline = time.time() + 20.0
+        while time.time() < flush_deadline and not _cancelled():
             try:
                 resp = c.get(items_url)
                 resp.raise_for_status()
                 parsed = resp.json()
                 if isinstance(parsed, list):
                     data = parsed
-                    if data:
+                    if data or status != "SUCCEEDED":
                         break
             except Exception:
                 pass
@@ -284,13 +339,27 @@ def _apify_run(
 _apify_post = _apify_run
 
 
-def _apify_run_with_retry(payload: dict, retries: int = 1) -> list[dict]:
-    """Run the actor, retry once if the dataset comes back empty
+def _apify_run_with_retry(
+    payload: dict,
+    *,
+    retries: int = 1,
+    max_wait: float = 120.0,
+    on_status=None,
+    cancel_event=None,
+) -> list[dict]:
+    """Run the actor; retry once if the dataset comes back empty
     despite a clean run. The actor is occasionally flaky and returns 0
     items for the same input on one attempt and the expected items on
     the next."""
-    for attempt in range(retries + 1):
-        items = _apify_run(payload)
+    for _ in range(retries + 1):
+        if cancel_event and cancel_event.is_set():
+            return []
+        items = _apify_run(
+            payload,
+            max_wait=max_wait,
+            on_status=on_status,
+            cancel_event=cancel_event,
+        )
         if items:
             return items
     return []
@@ -302,6 +371,9 @@ def _apify_recent(
     *,
     include_comments: bool = False,
     comments_per_post: int = 6,
+    on_status=None,
+    cancel_event=None,
+    max_wait: float = 120.0,
 ) -> tuple[list[dict], dict[str, list[str]]]:
     """Scrape recent posts (and optionally their top comments) across a
     set of subreddits in a single Apify run. Returns (posts, comments).
@@ -328,7 +400,15 @@ def _apify_recent(
         "skipUserPosts": True,
         "skipCommunity": True,
     }
-    items = _apify_run_with_retry(payload)
+    # No retry from this path: the caller's max_wait is a *total*
+    # budget, so retrying would double it. If the actor occasionally
+    # returns 0 items, the user can just click "find threads" again.
+    items = _apify_run(
+        payload,
+        max_wait=max_wait,
+        on_status=on_status,
+        cancel_event=cancel_event,
+    )
     posts: list[dict] = []
     comments_by_post: dict[str, list[str]] = {}
     for it in items:

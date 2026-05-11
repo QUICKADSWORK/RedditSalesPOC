@@ -184,33 +184,58 @@ function updateActionButtons() {
 // Step 3a: Threads
 // ---------------------------------------------------------------------------
 
+let _threadsAbort = null;
+
 $("#threads-btn").addEventListener("click", async () => {
   const status = $("#action-status");
   const btn = $("#threads-btn");
-  btn.disabled = true;
+
+  // If a run is already in flight, treat the click as a cancel.
+  if (_threadsAbort) {
+    _threadsAbort.abort();
+    _threadsAbort = null;
+    return;
+  }
+
+  if (state.selected.size > 4) {
+    status.className = "status error";
+    status.textContent =
+      `Pick at most 4 subreddits per run (you picked ${state.selected.size}). ` +
+      `Each one adds Apify scrape time — smaller batches are way faster.`;
+    return;
+  }
+
+  const originalLabel = btn.textContent;
+  btn.textContent = "Cancel";
+  btn.classList.add("danger");
   status.className = "status";
-  status.innerHTML =
-    '<span class="dots">starting search</span>';
+  status.innerHTML = '<span class="dots">starting search</span>';
 
   const body = {
     business: state.business,
     subreddits: [...state.selected],
     replies_per_thread: 3,
     max_threads: 6,
+    max_wait_seconds: 120,
   };
 
-  // Reset the threads section so the user sees threads stream in.
   const section = $("#threads-section");
   const out = $("#threads-body");
   out.innerHTML = "";
   section.classList.remove("hidden");
 
+  _threadsAbort = new AbortController();
   let threadCount = 0;
+  let lastRunUrl = "";
   try {
     await streamJSON("/api/threads/stream", body, (ev) => {
       if (ev.type === "step" || ev.type === "heartbeat") {
         status.classList.remove("error", "ok");
-        status.innerHTML = `<span class="dots">${escape(ev.message)}</span>`;
+        if (ev.run_url) lastRunUrl = ev.run_url;
+        const link = ev.run_url
+          ? ` · <a href="${ev.run_url}" target="_blank" rel="noopener" class="muted small">view on Apify</a>`
+          : "";
+        status.innerHTML = `<span class="dots">${escape(ev.message)}</span>${link}`;
       } else if (ev.type === "fetched") {
         status.innerHTML = `<span class="dots">${escape(ev.message)} · scoring with the LLM</span>`;
       } else if (ev.type === "thread") {
@@ -230,13 +255,21 @@ $("#threads-btn").addEventListener("click", async () => {
           status.textContent = `Found ${threadCount} thread${threadCount === 1 ? "" : "s"}${t}.`;
         }
       }
-    });
+    }, _threadsAbort.signal);
   } catch (err) {
-    console.error("threads stream failed", err);
-    status.classList.add("error");
-    status.textContent =
-      `Failed: ${err.message || err}. Check the terminal where you ran ./run.sh — there's likely a Python error there.`;
+    if (err.name === "AbortError") {
+      status.classList.add("error");
+      status.textContent = "Cancelled.";
+    } else {
+      console.error("threads stream failed", err);
+      status.classList.add("error");
+      status.textContent =
+        `Failed: ${err.message || err}. Check the terminal where you ran ./run.sh — there's likely a Python error there.`;
+    }
   } finally {
+    _threadsAbort = null;
+    btn.textContent = originalLabel;
+    btn.classList.remove("danger");
     updateActionButtons();
   }
 });
@@ -490,15 +523,17 @@ async function postJSON(path, body) {
   return r.json();
 }
 
-async function streamJSON(path, body, onEvent) {
+async function streamJSON(path, body, onEvent, signal) {
   let resp;
   try {
     resp = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify(body),
+      signal,
     });
   } catch (e) {
+    if (e.name === "AbortError") throw e;
     console.error(`Network error opening stream ${path}`, e);
     throw new Error(
       `Could not connect to ${path}. The server may have crashed — check the terminal.`,

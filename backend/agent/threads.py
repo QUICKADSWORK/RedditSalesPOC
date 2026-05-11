@@ -98,11 +98,12 @@ def find_threads(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 8,
+    per_sub: int = 6,
     total_limit: int = 6,
     replies_per_thread: int = 3,
     min_relevance: int = 35,
     max_age_days: int = 45,
+    max_wait_seconds: float = 120.0,
 ) -> list[dict]:
     """Blocking version. Use find_threads_stream for SSE."""
     final: dict = {"threads": []}
@@ -114,26 +115,29 @@ def find_threads(
         replies_per_thread=replies_per_thread,
         min_relevance=min_relevance,
         max_age_days=max_age_days,
+        max_wait_seconds=max_wait_seconds,
     ):
         if ev.get("type") == "done":
             final = ev
     return final.get("threads", [])
 
 
+_MAX_SUBREDDITS_PER_REQUEST = 4
+
+
 def find_threads_stream(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 8,
+    per_sub: int = 6,
     total_limit: int = 6,
     replies_per_thread: int = 3,
     min_relevance: int = 35,
     max_age_days: int = 45,
+    max_wait_seconds: float = 120.0,
 ) -> Iterator[dict]:
-    """Yield progress events as the search runs. Each event is a
-    JSON-ready dict with a "type" field. The final event is always
-    {"type": "done", "threads": [...]}.
-    """
+    """Yield progress events as the search runs. The final event is
+    always `{"type": "done", "threads": [...]}`."""
     import sys
 
     def log(msg: str) -> None:
@@ -142,22 +146,48 @@ def find_threads_stream(
     cutoff = time.time() - max_age_days * 86400
     t_start = time.time()
 
-    # ----- step 1: pull recent posts from each subreddit -------------
+    if len(subreddits) > _MAX_SUBREDDITS_PER_REQUEST:
+        yield {
+            "type": "done",
+            "threads": [],
+            "error": (
+                f"Pick at most {_MAX_SUBREDDITS_PER_REQUEST} subreddits "
+                f"per run (you picked {len(subreddits)}). Each subreddit "
+                f"adds Apify scrape time; small batches are much faster."
+            ),
+        }
+        return
+
     yield {
         "type": "step",
         "step": "fetch",
         "message": (
-            f"scraping recent posts from {len(subreddits)} subreddit"
+            f"starting Apify scrape across {len(subreddits)} subreddit"
             f"{'s' if len(subreddits) != 1 else ''}…"
         ),
     }
 
-    result: dict = {}
+    # Shared state between the scrape thread and the heartbeat loop.
+    result: dict = {"posts": []}
+    state: dict = {"apify_status": "READY", "run_id": ""}
+    state_lock = threading.Lock()
+    cancel_event = threading.Event()
+
+    def _on_status(meta: dict) -> None:
+        with state_lock:
+            state["apify_status"] = meta.get("status", state["apify_status"])
+            if meta.get("run_id"):
+                state["run_id"] = meta["run_id"]
 
     def _scrape() -> None:
         try:
             posts, _ = reddit_client.bulk_recent_threads(
-                subreddits, per_sub=per_sub, include_comments=False
+                subreddits,
+                per_sub=per_sub,
+                include_comments=False,
+                on_status=_on_status,
+                cancel_event=cancel_event,
+                max_wait=max_wait_seconds,
             )
             result["posts"] = posts
         except Exception as e:  # noqa: BLE001
@@ -165,17 +195,35 @@ def find_threads_stream(
 
     th = threading.Thread(target=_scrape, daemon=True)
     th.start()
-    # Heartbeat every 3 s so any proxy / browser keeps the connection.
+
     elapsed = 0
     while th.is_alive():
         th.join(timeout=3.0)
         if th.is_alive():
             elapsed += 3
+            with state_lock:
+                apify_status = state["apify_status"]
+                run_id = state["run_id"]
+            human = {
+                "READY": "queued in Apify",
+                "RUNNING": "scraping Reddit",
+                "SUCCEEDED": "wrapping up",
+                "FAILED": "actor failed",
+                "TIMED-OUT": "actor timed out",
+                "ABORTED": "run aborted",
+                "ABORTED_BY_AGENT": "aborted (took too long)",
+            }.get(apify_status, apify_status.lower())
             yield {
                 "type": "heartbeat",
                 "step": "fetch",
                 "elapsed": elapsed,
-                "message": f"still scraping… ({elapsed}s)",
+                "apify_status": apify_status,
+                "run_id": run_id,
+                "run_url": (
+                    f"https://console.apify.com/actors/runs/{run_id}"
+                    if run_id else ""
+                ),
+                "message": f"{human}… ({elapsed}s)",
             }
     th.join()
     if "error" in result:
@@ -184,8 +232,25 @@ def find_threads_stream(
     candidates = result.get("posts", [])
     log(
         f"bulk_recent_threads: {len(candidates)} posts from "
-        f"{len(subreddits)} subs in {time.time() - t_start:.1f}s"
+        f"{len(subreddits)} subs in {time.time() - t_start:.1f}s "
+        f"(apify={state['apify_status']})"
     )
+    if not candidates:
+        # Either Apify timed out or returned empty (flaky scrape).
+        if state["apify_status"] == "ABORTED_BY_AGENT":
+            msg = (
+                f"Apify scrape took longer than {int(max_wait_seconds)}s "
+                f"and was aborted. Try fewer subreddits, or wait a "
+                f"minute and retry — the actor is sometimes slow when "
+                f"it has to cold-start."
+            )
+        else:
+            msg = (
+                f"Reddit returned no recent posts for these subreddits. "
+                f"Try different subreddits or check APIFY_TOKEN."
+            )
+        yield {"type": "done", "threads": [], "message": msg}
+        return
     yield {
         "type": "fetched",
         "count": len(candidates),

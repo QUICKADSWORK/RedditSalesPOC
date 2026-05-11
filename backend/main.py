@@ -48,6 +48,7 @@ class ThreadsBody(BaseModel):
     replies_per_thread: int = Field(3, ge=2, le=4)
     max_threads: int = 6
     min_relevance: int = 30
+    max_wait_seconds: int = Field(120, ge=30, le=300)
 
 
 class PostsBody(BaseModel):
@@ -123,6 +124,7 @@ def threads(body: ThreadsBody) -> dict:
             replies_per_thread=body.replies_per_thread,
             total_limit=body.max_threads,
             min_relevance=body.min_relevance,
+            max_wait_seconds=body.max_wait_seconds,
         )
     except Exception as exc:
         raise HTTPException(500, f"Thread search failed: {exc}") from exc
@@ -152,6 +154,7 @@ def threads_stream(body: ThreadsBody):
                 replies_per_thread=body.replies_per_thread,
                 total_limit=body.max_threads,
                 min_relevance=body.min_relevance,
+                max_wait_seconds=body.max_wait_seconds,
             ):
                 yield f"data: {_json.dumps(ev)}\n\n"
         except Exception as exc:  # noqa: BLE001
