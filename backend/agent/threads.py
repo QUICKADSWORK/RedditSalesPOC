@@ -1,13 +1,26 @@
 """Find recent threads worth commenting on, and draft helpful replies.
 
-The flow is tuned for efficiency: in Apify mode we make exactly TWO
-paid API calls per "find threads" run -- one to pull recent posts from
-every selected subreddit, and one to pull comments for the top-scored
-threads after the LLM relevance pass.
+The flow is tuned for efficiency: in Apify mode we make exactly ONE
+paid API call per "find threads" run -- a single batched scrape of
+recent posts across every selected subreddit. The relevance pass is
+also batched into one LLM call.
+
+The public entry point comes in two flavours:
+
+  - find_threads(...)                     -> returns the full result list
+  - find_threads_stream(...)              -> yields progress events as
+                                             dicts, terminating with a
+                                             {"type": "done", ...}
+
+The streaming variant lets the API endpoint emit Server-Sent Events so
+the HTTP connection stays warm during the long Apify scrape and the
+client can show real progress.
 """
 from __future__ import annotations
 
+import threading
 import time
+from typing import Iterator
 
 from . import llm, reddit_client
 
@@ -85,36 +98,114 @@ def find_threads(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 10,
-    total_limit: int = 8,
+    per_sub: int = 8,
+    total_limit: int = 6,
     replies_per_thread: int = 3,
-    min_relevance: int = 55,
+    min_relevance: int = 35,
     max_age_days: int = 45,
 ) -> list[dict]:
+    """Blocking version. Use find_threads_stream for SSE."""
+    final: dict = {"threads": []}
+    for ev in find_threads_stream(
+        profile,
+        subreddits,
+        per_sub=per_sub,
+        total_limit=total_limit,
+        replies_per_thread=replies_per_thread,
+        min_relevance=min_relevance,
+        max_age_days=max_age_days,
+    ):
+        if ev.get("type") == "done":
+            final = ev
+    return final.get("threads", [])
+
+
+def find_threads_stream(
+    profile: dict,
+    subreddits: list[str],
+    *,
+    per_sub: int = 8,
+    total_limit: int = 6,
+    replies_per_thread: int = 3,
+    min_relevance: int = 35,
+    max_age_days: int = 45,
+) -> Iterator[dict]:
+    """Yield progress events as the search runs. Each event is a
+    JSON-ready dict with a "type" field. The final event is always
+    {"type": "done", "threads": [...]}.
+    """
     import sys
 
     def log(msg: str) -> None:
         print(f"[threads] {msg}", file=sys.stderr, flush=True)
 
     cutoff = time.time() - max_age_days * 86400
+    t_start = time.time()
 
-    t0 = time.time()
-    # We deliberately do NOT include comments inline -- it doubles
-    # actor runtime and the relevance/reply prompts work well from the
-    # post text alone.
-    candidates, inline_comments = reddit_client.bulk_recent_threads(
-        subreddits, per_sub=per_sub, include_comments=False
-    )
+    # ----- step 1: pull recent posts from each subreddit -------------
+    yield {
+        "type": "step",
+        "step": "fetch",
+        "message": (
+            f"scraping recent posts from {len(subreddits)} subreddit"
+            f"{'s' if len(subreddits) != 1 else ''}…"
+        ),
+    }
+
+    result: dict = {}
+
+    def _scrape() -> None:
+        try:
+            posts, _ = reddit_client.bulk_recent_threads(
+                subreddits, per_sub=per_sub, include_comments=False
+            )
+            result["posts"] = posts
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"scrape failed: {e}"
+
+    th = threading.Thread(target=_scrape, daemon=True)
+    th.start()
+    # Heartbeat every 3 s so any proxy / browser keeps the connection.
+    elapsed = 0
+    while th.is_alive():
+        th.join(timeout=3.0)
+        if th.is_alive():
+            elapsed += 3
+            yield {
+                "type": "heartbeat",
+                "step": "fetch",
+                "elapsed": elapsed,
+                "message": f"still scraping… ({elapsed}s)",
+            }
+    th.join()
+    if "error" in result:
+        yield {"type": "done", "threads": [], "error": result["error"]}
+        return
+    candidates = result.get("posts", [])
     log(
         f"bulk_recent_threads: {len(candidates)} posts from "
-        f"{len(subreddits)} subs in {time.time() - t0:.1f}s"
+        f"{len(subreddits)} subs in {time.time() - t_start:.1f}s"
     )
+    yield {
+        "type": "fetched",
+        "count": len(candidates),
+        "message": f"got {len(candidates)} recent posts",
+    }
     candidates = [
         p for p in candidates
         if not p.get("over_18") and (p.get("created_utc") or 0) >= cutoff
     ]
     if not candidates:
-        return []
+        yield {
+            "type": "done",
+            "threads": [],
+            "message": (
+                "No recent posts came back from Reddit for these "
+                "subreddits. Try different subreddits, lower the "
+                "min_relevance, or check that APIFY_TOKEN is valid."
+            ),
+        }
+        return
 
     seen: set[str] = set()
     uniq: list[dict] = []
@@ -125,10 +216,20 @@ def find_threads(
         seen.add(pid)
         uniq.append(p)
     uniq.sort(key=lambda p: -(p.get("created_utc") or 0))
-    uniq = uniq[:80]
+    uniq = uniq[:60]
 
+    # ----- step 2: score relevance with the LLM ----------------------
+    yield {
+        "type": "step",
+        "step": "score",
+        "message": f"scoring {len(uniq)} posts with the LLM…",
+    }
     t1 = time.time()
-    scored = _score_batch(profile, uniq)
+    try:
+        scored = _score_batch(profile, uniq)
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "done", "threads": [], "error": f"scoring failed: {e}"}
+        return
     log(
         f"scored {len(scored)} posts in {time.time() - t1:.1f}s; "
         f"top relevances="
@@ -145,36 +246,63 @@ def find_threads(
         f"(min={min_relevance})"
     )
     if not scored:
-        return []
+        yield {
+            "type": "done",
+            "threads": [],
+            "message": (
+                f"Found {len(uniq)} recent posts but none scored above "
+                f"{min_relevance}/100. Try lowering min_relevance or "
+                f"picking subreddits closer to your audience."
+            ),
+        }
+        return
 
-    if inline_comments:
-        comments_map = inline_comments
-    else:
-        comments_map = reddit_client.bulk_post_comments(scored, max_per_post=6)
+    # ----- step 3: draft replies for the top threads -----------------
+    yield {
+        "type": "step",
+        "step": "draft",
+        "message": (
+            f"drafting {replies_per_thread} replies for each of "
+            f"{len(scored)} threads…"
+        ),
+    }
 
     results: list[dict] = []
-    for p in scored:
+    for idx, p in enumerate(scored, 1):
         pid = p.get("id") or ""
-        comments = comments_map.get(pid, [])
-        replies = _draft_replies(profile, p, comments, replies_per_thread)
-        results.append(
-            {
-                "id": pid,
-                "subreddit": p["subreddit"],
-                "title": p["title"],
-                "selftext_preview": (p.get("selftext", "") or "")[:600],
-                "url": p["url"],
-                "score": p["score"],
-                "num_comments": p["num_comments"],
-                "created_utc": p["created_utc"],
-                "relevance": p["relevance"],
-                "intent": p["intent"],
-                "angle": p["angle"],
-                "top_comments_sampled": comments[:5],
-                "replies": replies,
-            }
-        )
-    return results
+        try:
+            replies = _draft_replies(profile, p, [], replies_per_thread)
+        except Exception as e:  # noqa: BLE001
+            log(f"reply draft failed for {pid}: {e}")
+            replies = []
+        thread = {
+            "id": pid,
+            "subreddit": p["subreddit"],
+            "title": p["title"],
+            "selftext_preview": (p.get("selftext", "") or "")[:600],
+            "url": p["url"],
+            "score": p["score"],
+            "num_comments": p["num_comments"],
+            "created_utc": p["created_utc"],
+            "relevance": p["relevance"],
+            "intent": p["intent"],
+            "angle": p["angle"],
+            "top_comments_sampled": [],
+            "replies": replies,
+        }
+        results.append(thread)
+        yield {
+            "type": "thread",
+            "index": idx,
+            "total": len(scored),
+            "thread": thread,
+        }
+
+    yield {
+        "type": "done",
+        "threads": results,
+        "elapsed_seconds": round(time.time() - t_start, 1),
+    }
 
 
 # ---------------------------------------------------------------------------

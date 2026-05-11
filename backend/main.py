@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -46,8 +46,8 @@ class ThreadsBody(BaseModel):
     business: dict
     subreddits: list[str]
     replies_per_thread: int = Field(3, ge=2, le=4)
-    max_threads: int = 8
-    min_relevance: int = 35
+    max_threads: int = 6
+    min_relevance: int = 30
 
 
 class PostsBody(BaseModel):
@@ -127,6 +127,46 @@ def threads(body: ThreadsBody) -> dict:
     except Exception as exc:
         raise HTTPException(500, f"Thread search failed: {exc}") from exc
     return {"threads": results}
+
+
+@app.post("/api/threads/stream")
+def threads_stream(body: ThreadsBody):
+    """Server-Sent Events version of /api/threads.
+
+    The client receives progress events (`step`, `heartbeat`,
+    `fetched`, `thread`) as the search runs, and a final `done` event
+    with the complete result list. This keeps the connection warm
+    during the long Apify scrape so it doesn't get killed by an idle
+    timeout somewhere between the browser and the server.
+    """
+    if not body.subreddits:
+        raise HTTPException(400, "subreddits is empty")
+
+    import json as _json
+
+    def event_stream():
+        try:
+            for ev in threads_mod.find_threads_stream(
+                body.business,
+                body.subreddits,
+                replies_per_thread=body.replies_per_thread,
+                total_limit=body.max_threads,
+                min_relevance=body.min_relevance,
+            ):
+                yield f"data: {_json.dumps(ev)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            err = {"type": "done", "threads": [], "error": str(exc)}
+            yield f"data: {_json.dumps(err)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable nginx-style buffering
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/posts")

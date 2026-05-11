@@ -190,25 +190,121 @@ $("#threads-btn").addEventListener("click", async () => {
   btn.disabled = true;
   status.className = "status";
   status.innerHTML =
-    '<span class="dots">scanning recent threads &amp; drafting replies</span>';
+    '<span class="dots">starting search</span>';
 
+  const body = {
+    business: state.business,
+    subreddits: [...state.selected],
+    replies_per_thread: 3,
+    max_threads: 6,
+  };
+
+  // Reset the threads section so the user sees threads stream in.
+  const section = $("#threads-section");
+  const out = $("#threads-body");
+  out.innerHTML = "";
+  section.classList.remove("hidden");
+
+  let threadCount = 0;
   try {
-    const data = await postJSON("/api/threads", {
-      business: state.business,
-      subreddits: [...state.selected],
-      replies_per_thread: 3,
-      max_threads: 8,
+    await streamJSON("/api/threads/stream", body, (ev) => {
+      if (ev.type === "step" || ev.type === "heartbeat") {
+        status.classList.remove("error", "ok");
+        status.innerHTML = `<span class="dots">${escape(ev.message)}</span>`;
+      } else if (ev.type === "fetched") {
+        status.innerHTML = `<span class="dots">${escape(ev.message)} · scoring with the LLM</span>`;
+      } else if (ev.type === "thread") {
+        threadCount += 1;
+        appendThread(ev.thread);
+        status.innerHTML = `<span class="dots">drafted ${threadCount} / ${ev.total} threads</span>`;
+      } else if (ev.type === "done") {
+        if (ev.error) {
+          status.classList.add("error");
+          status.textContent = `Failed: ${ev.error}`;
+        } else if (!threadCount && ev.message) {
+          status.classList.add("error");
+          status.textContent = ev.message;
+        } else {
+          status.classList.add("ok");
+          const t = ev.elapsed_seconds ? ` in ${ev.elapsed_seconds}s` : "";
+          status.textContent = `Found ${threadCount} thread${threadCount === 1 ? "" : "s"}${t}.`;
+        }
+      }
     });
-    renderThreads(data.threads || []);
-    status.classList.add("ok");
-    status.textContent = `Found ${data.threads.length} threads.`;
   } catch (err) {
+    console.error("threads stream failed", err);
     status.classList.add("error");
-    status.textContent = err.message || "Failed.";
+    status.textContent =
+      `Failed: ${err.message || err}. Check the terminal where you ran ./run.sh — there's likely a Python error there.`;
   } finally {
     updateActionButtons();
   }
 });
+
+function appendThread(t) {
+  const body = $("#threads-body");
+  const card = el("div", "thread");
+
+  const head = el("div", "thread-head");
+  const title = el("div", "thread-title");
+  const link = document.createElement("a");
+  link.href = t.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = t.title;
+  title.appendChild(link);
+  head.appendChild(title);
+  head.appendChild(
+    el(
+      "span",
+      `relevance ${t.relevance >= 75 ? "high" : t.relevance >= 50 ? "mid" : ""}`,
+      `${t.relevance}/100 · ${t.intent}`,
+    ),
+  );
+  card.appendChild(head);
+
+  card.appendChild(
+    el(
+      "div",
+      "thread-meta",
+      `r/${t.subreddit} · ${t.num_comments} comments · ${formatAge(t.created_utc)}`,
+    ),
+  );
+
+  if (t.angle) card.appendChild(el("div", "thread-angle", t.angle));
+  if (t.selftext_preview)
+    card.appendChild(el("div", "thread-preview", t.selftext_preview));
+
+  if (t.replies && t.replies.length) {
+    const wrap = el("div", "replies");
+    t.replies.forEach((r) => {
+      const rcard = el("div", "reply");
+      const angle = el("div", "angle");
+      angle.appendChild(el("span", "", r.angle || "draft"));
+      const copy = el("button", "copy-btn", "copy");
+      copy.addEventListener("click", (e) => {
+        e.preventDefault();
+        navigator.clipboard.writeText(r.text).then(() => {
+          copy.textContent = "copied";
+          setTimeout(() => (copy.textContent = "copy"), 1200);
+        });
+      });
+      angle.appendChild(copy);
+      rcard.appendChild(angle);
+      rcard.appendChild(el("div", "text", r.text));
+      wrap.appendChild(rcard);
+    });
+    card.appendChild(wrap);
+  }
+
+  body.appendChild(card);
+}
+
+function escape(s) {
+  const d = document.createElement("div");
+  d.textContent = String(s ?? "");
+  return d.innerHTML;
+}
 
 function renderThreads(threads) {
   const section = $("#threads-section");
@@ -369,20 +465,74 @@ function renderPosts(posts) {
 // ---------------------------------------------------------------------------
 
 async function postJSON(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let r;
+  try {
+    r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error(`Network error calling ${path}`, e);
+    throw new Error(
+      `Network error (${e.message || e}). The server may have crashed — check the terminal where you ran ./run.sh.`,
+    );
+  }
   if (!r.ok) {
-    let msg = `${r.status}`;
+    let msg = `HTTP ${r.status}`;
     try {
       const j = await r.json();
       if (j.detail) msg = j.detail;
     } catch (_e) {}
+    console.error(`${path} returned ${r.status}: ${msg}`);
     throw new Error(msg);
   }
   return r.json();
+}
+
+async function streamJSON(path, body, onEvent) {
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error(`Network error opening stream ${path}`, e);
+    throw new Error(
+      `Could not connect to ${path}. The server may have crashed — check the terminal.`,
+    );
+  }
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const j = await resp.json();
+      if (j.detail) msg = j.detail;
+    } catch (_e) {}
+    throw new Error(msg);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) !== -1) {
+      const raw = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const lines = raw.split("\n").filter((l) => l.startsWith("data:"));
+      if (!lines.length) continue;
+      const payload = lines.map((l) => l.slice(5).trimStart()).join("\n");
+      try {
+        onEvent(JSON.parse(payload));
+      } catch (e) {
+        console.warn("bad SSE chunk", payload, e);
+      }
+    }
+  }
 }
 
 function el(tag, cls, text) {
