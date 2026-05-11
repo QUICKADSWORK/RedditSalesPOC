@@ -273,8 +273,7 @@ $("#threads-btn").addEventListener("click", async () => {
     } else {
       console.error("threads stream failed", err);
       status.classList.add("error");
-      status.textContent =
-        `Failed: ${err.message || err}. Check the terminal where you ran ./run.sh — there's likely a Python error there.`;
+      status.textContent = err.message || String(err);
     }
   } finally {
     _threadsAbort = null;
@@ -551,15 +550,18 @@ async function streamJSON(path, body, onEvent, signal) {
   try {
     resp = await fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
       body: JSON.stringify(body),
       signal,
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    console.error(`Network error opening stream ${path}`, e);
+    console.error(`Could not connect to ${path}`, e);
     throw new Error(
-      `Could not connect to ${path}. The server may have crashed — check the terminal.`,
+      `Could not reach the server at ${location.host}. Open the terminal where you ran ./run.sh — if it's not running, restart it. If it is, the URL printed by run.sh might differ from the one this tab is on.`,
     );
   }
   if (!resp.ok) {
@@ -570,26 +572,64 @@ async function streamJSON(path, body, onEvent, signal) {
     } catch (_e) {}
     throw new Error(msg);
   }
+
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n\n")) !== -1) {
-      const raw = buf.slice(0, i);
-      buf = buf.slice(i + 2);
-      const lines = raw.split("\n").filter((l) => l.startsWith("data:"));
-      if (!lines.length) continue;
-      const payload = lines.map((l) => l.slice(5).trimStart()).join("\n");
-      try {
-        onEvent(JSON.parse(payload));
-      } catch (e) {
-        console.warn("bad SSE chunk", payload, e);
+  let eventsReceived = 0;
+  let lastEvent = null;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) !== -1) {
+        const raw = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const lines = raw
+          .split("\n")
+          .filter((l) => l.startsWith("data:"));
+        if (!lines.length) continue;
+        const payload = lines
+          .map((l) => l.slice(5).trimStart())
+          .join("\n");
+        let ev;
+        try {
+          ev = JSON.parse(payload);
+        } catch (e) {
+          console.warn("bad SSE chunk", payload, e);
+          continue;
+        }
+        eventsReceived += 1;
+        lastEvent = ev;
+        try {
+          onEvent(ev);
+        } catch (e) {
+          console.error("onEvent handler raised", e, ev);
+        }
+        if (ev.type === "done") return;
       }
     }
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    console.error(
+      `Mid-stream failure on ${path}. events received=${eventsReceived}`,
+      e,
+      "last event:",
+      lastEvent,
+    );
+    const hint = eventsReceived
+      ? `received ${eventsReceived} event${eventsReceived === 1 ? "" : "s"}, last type: ${lastEvent?.type ?? "?"}`
+      : "no events received";
+    throw new Error(
+      `Connection dropped (${hint}). Check the terminal — the server probably crashed. Refresh this page after it auto-restarts.`,
+    );
+  }
+  if (eventsReceived === 0) {
+    throw new Error(
+      "Server closed the stream without sending any data. Check the terminal for a Python error.",
+    );
   }
 }
 

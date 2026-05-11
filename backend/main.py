@@ -162,13 +162,32 @@ def threads_stream(body: ThreadsBody):
     with the complete result list. This keeps the connection warm
     during the long Apify scrape so it doesn't get killed by an idle
     timeout somewhere between the browser and the server.
+
+    Hardened against every failure mode I could think of:
+      - Catches BaseException (not just Exception) so async-cancel
+        errors can't escape and silently kill the stream.
+      - Always yields a final `done` event before returning, even on
+        error or early exit, so the client never has to guess.
+      - Comment-line keep-alives (`:keepalive\n\n`) every event so
+        intermediate proxies don't classify the stream as idle.
     """
     if not body.subreddits:
         raise HTTPException(400, "subreddits is empty")
 
     import json as _json
 
+    def _send(ev: dict) -> str:
+        # The leading ':keepalive\n' is a comment line per the SSE
+        # spec; clients ignore it but proxies see traffic.
+        try:
+            return ":keepalive\n" + f"data: {_json.dumps(ev)}\n\n"
+        except (TypeError, ValueError):
+            safe = {"type": ev.get("type", "unknown"),
+                    "error": "non-serializable event"}
+            return f"data: {_json.dumps(safe)}\n\n"
+
     def event_stream():
+        sent_done = False
         try:
             for ev in threads_mod.find_threads_stream(
                 body.business,
@@ -178,10 +197,37 @@ def threads_stream(body: ThreadsBody):
                 min_relevance=body.min_relevance,
                 max_wait_seconds=body.max_wait_seconds,
             ):
-                yield f"data: {_json.dumps(ev)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            err = {"type": "done", "threads": [], "error": str(exc)}
-            yield f"data: {_json.dumps(err)}\n\n"
+                if ev.get("type") == "done":
+                    sent_done = True
+                yield _send(ev)
+        except GeneratorExit:
+            # Client disconnected. Don't try to yield anything else.
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            _logger.error(
+                "threads_stream blew up: %s: %s",
+                type(exc).__name__, exc,
+            )
+            traceback.print_exc()
+            err = {
+                "type": "done",
+                "threads": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            try:
+                yield _send(err)
+            except Exception:
+                pass
+            return
+        if not sent_done:
+            try:
+                yield _send({
+                    "type": "done",
+                    "threads": [],
+                    "error": "stream ended without a done event",
+                })
+            except Exception:
+                pass
 
     return StreamingResponse(
         event_stream(),
