@@ -20,6 +20,40 @@ before posting.
 
 ---
 
+## Deploy to Render
+
+This repo has a `render.yaml` blueprint, so you can deploy the whole
+thing (FastAPI backend + frontend in one service) with a few clicks.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/QUICKADSWORK/RedditSalesPOC)
+
+Manual setup, if you'd rather:
+
+1. Push this repo to your own GitHub (fork if needed).
+2. Go to <https://dashboard.render.com/select-repo?type=blueprint> →
+   pick the repo. Render reads `render.yaml` and proposes one Web
+   Service called `reddit-sales-agent`.
+3. Fill in the three secret env vars in the dashboard:
+   - `ANTHROPIC_API_KEY` — required.
+   - `APIFY_TOKEN` — required for live Reddit data.
+   - `OPENAI_API_KEY` — optional, only if you want OpenAI as a fallback.
+4. Click **Apply / Deploy**. First build takes ~2 minutes.
+5. You'll get a public URL like `https://reddit-sales-agent.onrender.com`.
+   Open it. The status pill in the header should say
+   `anthropic • apify`.
+
+**Free-tier note.** Render's free plan spins the service down after
+~15 minutes of inactivity. The next request takes ~30 s to wake the
+container up. The SSE keep-alives in `/api/threads/stream` mean this
+only adds a one-time cold-start delay; the request itself doesn't
+time out. Upgrade to the `Starter` plan ($7/mo) to keep it warm.
+
+**Why one service, not two?** FastAPI serves the static frontend from
+`/` itself (see the `StaticFiles` mount in `backend/main.py`), so we
+don't need a separate Render Static Site. Less config, less to break.
+
+---
+
 ## Quickstart — run the local site
 
 You need Python 3.9+ and an OpenAI API key. Reddit credentials are

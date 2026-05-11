@@ -1,0 +1,58 @@
+# Render.com Blueprint -- one-click deploy of the Reddit Sales Agent.
+#
+# 1. Fork / clone this repo to your own GitHub.
+# 2. On Render: New + -> Blueprint -> pick this repo. Render reads
+#    this file and creates the service.
+# 3. Fill in the three secret env vars in the dashboard:
+#       ANTHROPIC_API_KEY   (required)
+#       APIFY_TOKEN         (required for live Reddit data)
+#       OPENAI_API_KEY      (optional, only if you prefer OpenAI)
+# 4. Click Deploy. Render will install deps, start the server, and
+#    give you a public https://<name>.onrender.com URL.
+#
+# Free tier note: the service spins down after ~15 min of inactivity.
+# The first request after a spin-down takes ~30 s to wake up. The SSE
+# keep-alives in /api/threads/stream prevent the connection from
+# dying mid-stream, so this only adds a one-time delay.
+
+services:
+  - type: web
+    name: reddit-sales-agent
+    runtime: python
+    plan: free                  # change to "starter" ($7/mo) to keep it warm
+    buildCommand: pip install -r backend/requirements.txt
+    # `cd backend` so the `from agent import ...` imports in main.py
+    # resolve naturally (same as how run.sh runs the app locally).
+    # `python -m uvicorn` is used (instead of bare `uvicorn`) so the
+    # command works regardless of whether the venv's bin is on PATH.
+    startCommand: >-
+      cd backend &&
+      python -m uvicorn main:app
+      --host 0.0.0.0
+      --port $PORT
+      --proxy-headers
+      --forwarded-allow-ips=*
+      --timeout-keep-alive 75
+    healthCheckPath: /api/health
+    autoDeploy: true            # redeploy on every push to the main branch
+
+    envVars:
+      # --- runtime ---
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+      # --- LLM defaults (override in dashboard if you want) ---
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+
+      # --- Apify defaults ---
+      - key: APIFY_ACTOR_ID
+        value: trudax~reddit-scraper-lite
+
+      # --- secrets: set these in the Render dashboard, not here ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
