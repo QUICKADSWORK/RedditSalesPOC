@@ -46,9 +46,9 @@ class ThreadsBody(BaseModel):
     business: dict
     subreddits: list[str]
     replies_per_thread: int = Field(3, ge=2, le=4)
-    max_threads: int = 6
-    min_relevance: int = 30
-    max_wait_seconds: int = Field(120, ge=30, le=300)
+    max_threads: int = 25
+    min_relevance: int = 10
+    max_wait_seconds: int = Field(240, ge=30, le=600)
 
 
 class PostsBody(BaseModel):

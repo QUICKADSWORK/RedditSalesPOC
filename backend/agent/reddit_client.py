@@ -270,10 +270,14 @@ def _apify_run(
                 pass
 
         # 2. Poll until terminal status, our timeout, or cancellation.
+        # We also peek at the dataset every few polls so the caller
+        # can surface 'X items scraped so far' to the UI.
         deadline = time.time() + max_wait
         status = run.get("status", "READY")
         terminal = {"SUCCEEDED", "FAILED", "TIMED-OUT", "ABORTED"}
         timed_out = False
+        last_item_count = 0
+        peek_counter = 0
         while status not in terminal:
             if _cancelled():
                 break
@@ -285,18 +289,60 @@ def _apify_run(
                 s = c.get(f"{_APIFY_BASE}/actor-runs/{run_id}?token={token}")
                 s.raise_for_status()
                 new_status = (s.json().get("data") or {}).get("status", status)
-                if new_status != status and on_status:
-                    try:
-                        on_status({"status": new_status, "run_id": run_id})
-                    except Exception:
-                        pass
-                status = new_status
             except Exception:
                 continue
+            peek_counter += 1
+            new_count = last_item_count
+            # Peek dataset every ~9 s (every 3 polls at 3 s) to limit
+            # extra API hits.
+            if peek_counter % 3 == 0:
+                try:
+                    head = c.get(
+                        f"{_APIFY_BASE}/datasets/{dataset_id}/items"
+                        f"?token={token}&format=json&limit=0&clean=true"
+                    )
+                    # The X-Total-Count response header is the cheapest
+                    # source of dataset size without fetching items.
+                    new_count = int(
+                        head.headers.get("X-Total-Count") or last_item_count
+                    )
+                except Exception:
+                    pass
+            if (new_status != status or new_count != last_item_count) and on_status:
+                try:
+                    on_status(
+                        {
+                            "status": new_status,
+                            "run_id": run_id,
+                            "items_so_far": new_count,
+                        }
+                    )
+                except Exception:
+                    pass
+            status = new_status
+            last_item_count = new_count
 
-        # 3. If we gave up before the actor finished, abort it server-
-        # side so the user isn't billed for the rest of the run.
+        items_url = (
+            f"{_APIFY_BASE}/datasets/{dataset_id}/items"
+            f"?token={token}&format=json"
+        )
+
+        def _fetch_dataset() -> list:
+            try:
+                resp = c.get(items_url)
+                resp.raise_for_status()
+                parsed = resp.json()
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+
+        # 3. If we gave up before the actor finished, FIRST grab any
+        # items the actor already wrote to the dataset (Apify streams
+        # items into the dataset as it scrapes them, so a partial run
+        # is still useful), THEN abort the run so the user isn't
+        # billed for the rest.
         if timed_out or (_cancelled() and status not in terminal):
+            partial = _fetch_dataset()
             try:
                 c.post(
                     f"{_APIFY_BASE}/actor-runs/{run_id}/abort?token={token}"
@@ -305,31 +351,24 @@ def _apify_run(
                 pass
             if on_status:
                 try:
-                    on_status({"status": "ABORTED_BY_AGENT", "run_id": run_id})
+                    on_status(
+                        {
+                            "status": "ABORTED_BY_AGENT",
+                            "run_id": run_id,
+                            "partial_items": len(partial),
+                        }
+                    )
                 except Exception:
                     pass
-            return []
+            return partial
 
-        # 4. Fetch dataset items. The dataset can lag the run status
-        # by a few seconds, so we poll briefly for the flush.
-        items_url = (
-            f"{_APIFY_BASE}/datasets/{dataset_id}/items"
-            f"?token={token}&format=json"
-        )
+        # 4. Run reached a terminal state. The dataset can lag the run
+        # status by a few seconds, so we poll briefly for the flush.
         data: list = []
         flush_deadline = time.time() + 20.0
         while time.time() < flush_deadline and not _cancelled():
-            try:
-                resp = c.get(items_url)
-                resp.raise_for_status()
-                parsed = resp.json()
-                if isinstance(parsed, list):
-                    data = parsed
-                    if data or status != "SUCCEEDED":
-                        break
-            except Exception:
-                pass
-            if status != "SUCCEEDED":
+            data = _fetch_dataset()
+            if data or status != "SUCCEEDED":
                 break
             time.sleep(1.5)
         return data

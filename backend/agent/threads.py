@@ -1,23 +1,22 @@
 """Find recent threads worth commenting on, and draft helpful replies.
 
-The flow is tuned for efficiency: in Apify mode we make exactly ONE
-paid API call per "find threads" run -- a single batched scrape of
-recent posts across every selected subreddit. The relevance pass is
-also batched into one LLM call.
+The flow is tuned for efficiency:
+
+  - ONE paid Apify call per request -- a single batched scrape of
+    recent posts across every selected subreddit.
+  - ONE batched LLM call to score every post for relevance.
+  - PARALLEL LLM calls (default concurrency 4) to draft replies for
+    each kept thread; finished threads stream back as they complete,
+    so the user sees results faster than the worst-case wall time.
 
 The public entry point comes in two flavours:
 
-  - find_threads(...)                     -> returns the full result list
-  - find_threads_stream(...)              -> yields progress events as
-                                             dicts, terminating with a
-                                             {"type": "done", ...}
-
-The streaming variant lets the API endpoint emit Server-Sent Events so
-the HTTP connection stays warm during the long Apify scrape and the
-client can show real progress.
+  - find_threads(...)            -> returns the full result list
+  - find_threads_stream(...)     -> yields SSE-ready progress events
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import threading
 import time
 from typing import Iterator
@@ -98,12 +97,12 @@ def find_threads(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 6,
-    total_limit: int = 6,
+    per_sub: int = 12,
+    total_limit: int = 25,
     replies_per_thread: int = 3,
-    min_relevance: int = 35,
+    min_relevance: int = 10,
     max_age_days: int = 45,
-    max_wait_seconds: float = 120.0,
+    max_wait_seconds: float = 240.0,
 ) -> list[dict]:
     """Blocking version. Use find_threads_stream for SSE."""
     final: dict = {"threads": []}
@@ -129,12 +128,13 @@ def find_threads_stream(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 6,
-    total_limit: int = 6,
+    per_sub: int = 12,
+    total_limit: int = 25,
     replies_per_thread: int = 3,
-    min_relevance: int = 35,
+    min_relevance: int = 10,
     max_age_days: int = 45,
-    max_wait_seconds: float = 120.0,
+    max_wait_seconds: float = 240.0,
+    draft_concurrency: int = 4,
 ) -> Iterator[dict]:
     """Yield progress events as the search runs. The final event is
     always `{"type": "done", "threads": [...]}`."""
@@ -169,7 +169,7 @@ def find_threads_stream(
 
     # Shared state between the scrape thread and the heartbeat loop.
     result: dict = {"posts": []}
-    state: dict = {"apify_status": "READY", "run_id": ""}
+    state: dict = {"apify_status": "READY", "run_id": "", "items": 0}
     state_lock = threading.Lock()
     cancel_event = threading.Event()
 
@@ -178,6 +178,10 @@ def find_threads_stream(
             state["apify_status"] = meta.get("status", state["apify_status"])
             if meta.get("run_id"):
                 state["run_id"] = meta["run_id"]
+            if "items_so_far" in meta:
+                state["items"] = int(meta.get("items_so_far") or 0)
+            if "partial_items" in meta:
+                state["items"] = int(meta.get("partial_items") or 0)
 
     def _scrape() -> None:
         try:
@@ -204,6 +208,7 @@ def find_threads_stream(
             with state_lock:
                 apify_status = state["apify_status"]
                 run_id = state["run_id"]
+                items_so_far = state["items"]
             human = {
                 "READY": "queued in Apify",
                 "RUNNING": "scraping Reddit",
@@ -213,17 +218,21 @@ def find_threads_stream(
                 "ABORTED": "run aborted",
                 "ABORTED_BY_AGENT": "aborted (took too long)",
             }.get(apify_status, apify_status.lower())
+            tail = (
+                f" · {items_so_far} items scraped" if items_so_far else ""
+            )
             yield {
                 "type": "heartbeat",
                 "step": "fetch",
                 "elapsed": elapsed,
                 "apify_status": apify_status,
                 "run_id": run_id,
+                "items_so_far": items_so_far,
                 "run_url": (
                     f"https://console.apify.com/actors/runs/{run_id}"
                     if run_id else ""
                 ),
-                "message": f"{human}… ({elapsed}s)",
+                "message": f"{human}… ({elapsed}s){tail}",
             }
     th.join()
     if "error" in result:
@@ -236,13 +245,12 @@ def find_threads_stream(
         f"(apify={state['apify_status']})"
     )
     if not candidates:
-        # Either Apify timed out or returned empty (flaky scrape).
         if state["apify_status"] == "ABORTED_BY_AGENT":
             msg = (
                 f"Apify scrape took longer than {int(max_wait_seconds)}s "
-                f"and was aborted. Try fewer subreddits, or wait a "
-                f"minute and retry — the actor is sometimes slow when "
-                f"it has to cold-start."
+                f"and was aborted before any posts were written. The "
+                f"actor is having a slow day — try again in a minute, "
+                f"or bump max_wait_seconds in the request."
             )
         else:
             msg = (
@@ -251,10 +259,16 @@ def find_threads_stream(
             )
         yield {"type": "done", "threads": [], "message": msg}
         return
+    if state["apify_status"] == "ABORTED_BY_AGENT":
+        partial_note = " (partial — scrape was aborted at the budget)"
+    else:
+        partial_note = ""
     yield {
         "type": "fetched",
         "count": len(candidates),
-        "message": f"got {len(candidates)} recent posts",
+        "message": (
+            f"got {len(candidates)} recent posts from Apify{partial_note}"
+        ),
     }
     candidates = [
         p for p in candidates
@@ -300,6 +314,7 @@ def find_threads_stream(
         f"top relevances="
         f"{sorted([s['relevance'] for s in scored], reverse=True)[:8]}"
     )
+    total_scored = len(scored)
     scored = [
         s for s in scored
         if s["relevance"] >= min_relevance and s["intent"] != "off_topic"
@@ -310,6 +325,16 @@ def find_threads_stream(
         f"kept {len(scored)} posts after relevance filter "
         f"(min={min_relevance})"
     )
+    yield {
+        "type": "filtered",
+        "scored": total_scored,
+        "kept": len(scored),
+        "min_relevance": min_relevance,
+        "message": (
+            f"scored {total_scored} posts, {len(scored)} passed the "
+            f"relevance bar (min={min_relevance})"
+        ),
+    }
     if not scored:
         yield {
             "type": "done",
@@ -322,25 +347,25 @@ def find_threads_stream(
         }
         return
 
-    # ----- step 3: draft replies for the top threads -----------------
+    # ----- step 3: draft replies in parallel -------------------------
+    workers = max(1, min(draft_concurrency, len(scored)))
     yield {
         "type": "step",
         "step": "draft",
         "message": (
-            f"drafting {replies_per_thread} replies for each of "
-            f"{len(scored)} threads…"
+            f"drafting {replies_per_thread} replies for {len(scored)} "
+            f"threads ({workers}× parallel)…"
         ),
     }
 
-    results: list[dict] = []
-    for idx, p in enumerate(scored, 1):
+    def _build_thread(p: dict) -> dict:
         pid = p.get("id") or ""
         try:
             replies = _draft_replies(profile, p, [], replies_per_thread)
         except Exception as e:  # noqa: BLE001
             log(f"reply draft failed for {pid}: {e}")
             replies = []
-        thread = {
+        return {
             "id": pid,
             "subreddit": p["subreddit"],
             "title": p["title"],
@@ -355,14 +380,33 @@ def find_threads_stream(
             "top_comments_sampled": [],
             "replies": replies,
         }
-        results.append(thread)
-        yield {
-            "type": "thread",
-            "index": idx,
-            "total": len(scored),
-            "thread": thread,
-        }
 
+    results: list[dict] = []
+    pool = cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="draft")
+    try:
+        futures = {pool.submit(_build_thread, p): p for p in scored}
+        idx = 0
+        for fut in cf.as_completed(futures):
+            idx += 1
+            try:
+                thread = fut.result()
+            except Exception as e:  # noqa: BLE001
+                log(f"draft worker raised: {e}")
+                continue
+            results.append(thread)
+            yield {
+                "type": "thread",
+                "index": idx,
+                "total": len(scored),
+                "thread": thread,
+            }
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    # Sort the final summary by relevance so consumers of /api/threads
+    # (non-streaming) get a sensible ordering. The streaming UI sorts
+    # client-side as items arrive.
+    results.sort(key=lambda t: -t["relevance"])
     yield {
         "type": "done",
         "threads": results,

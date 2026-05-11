@@ -215,8 +215,9 @@ $("#threads-btn").addEventListener("click", async () => {
     business: state.business,
     subreddits: [...state.selected],
     replies_per_thread: 3,
-    max_threads: 6,
-    max_wait_seconds: 120,
+    max_threads: 25,
+    min_relevance: 10,
+    max_wait_seconds: 240,
   };
 
   const section = $("#threads-section");
@@ -238,6 +239,8 @@ $("#threads-btn").addEventListener("click", async () => {
         status.innerHTML = `<span class="dots">${escape(ev.message)}</span>${link}`;
       } else if (ev.type === "fetched") {
         status.innerHTML = `<span class="dots">${escape(ev.message)} · scoring with the LLM</span>`;
+      } else if (ev.type === "filtered") {
+        status.innerHTML = `<span class="dots">${escape(ev.message)} · drafting replies in parallel</span>`;
       } else if (ev.type === "thread") {
         threadCount += 1;
         appendThread(ev.thread);
@@ -277,6 +280,7 @@ $("#threads-btn").addEventListener("click", async () => {
 function appendThread(t) {
   const body = $("#threads-body");
   const card = el("div", "thread");
+  card.dataset.relevance = String(t.relevance ?? 0);
 
   const head = el("div", "thread-head");
   const title = el("div", "thread-title");
@@ -330,7 +334,19 @@ function appendThread(t) {
     card.appendChild(wrap);
   }
 
-  body.appendChild(card);
+  // Keep the list sorted by relevance descending as parallel-drafted
+  // threads stream in out of order.
+  const rel = t.relevance ?? 0;
+  let inserted = false;
+  for (const sibling of [...body.children]) {
+    const sRel = parseInt(sibling.dataset.relevance ?? "0", 10);
+    if (rel > sRel) {
+      body.insertBefore(card, sibling);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) body.appendChild(card);
 }
 
 function escape(s) {
