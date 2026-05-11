@@ -134,7 +134,7 @@ def find_threads_stream(
     min_relevance: int = 10,
     max_age_days: int = 45,
     max_wait_seconds: float = 180.0,
-    draft_concurrency: int = 4,
+    draft_concurrency: int = 3,
 ) -> Iterator[dict]:
     """Yield progress events as the search runs. The final event is
     always `{"type": "done", "threads": [...]}`."""
@@ -381,25 +381,67 @@ def find_threads_stream(
             "replies": replies,
         }
 
+    # Hard cap on the *whole* drafting phase. The per-LLM-call timeout
+    # in llm.py is the main backstop, but if for any reason a worker
+    # gets stuck (network hang, retries, etc.) we'd rather ship the
+    # threads we've already drafted than wait indefinitely.
+    # Budget: 75 s per thread, capped at 4 minutes total.
+    draft_deadline = time.time() + min(75.0 * len(scored), 240.0)
+
     results: list[dict] = []
-    pool = cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="draft")
+    timed_out = 0
+    pool = cf.ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="draft"
+    )
+    futures: dict = {}
     try:
         futures = {pool.submit(_build_thread, p): p for p in scored}
         idx = 0
-        for fut in cf.as_completed(futures):
-            idx += 1
-            try:
-                thread = fut.result()
-            except Exception as e:  # noqa: BLE001
-                log(f"draft worker raised: {e}")
+        while futures:
+            remaining = draft_deadline - time.time()
+            if remaining <= 0:
+                break
+            # Wait for at least one future to finish (or our heartbeat
+            # window expires), so progress messages keep flowing.
+            done, _ = cf.wait(
+                futures,
+                timeout=min(remaining, 15.0),
+                return_when=cf.FIRST_COMPLETED,
+            )
+            if not done:
+                yield {
+                    "type": "heartbeat",
+                    "step": "draft",
+                    "elapsed": int(time.time() - t_start),
+                    "message": (
+                        f"drafted {idx} / {len(scored)} threads… "
+                        f"still waiting on {len(futures)} reply call"
+                        f"{'s' if len(futures) != 1 else ''}"
+                    ),
+                }
                 continue
-            results.append(thread)
-            yield {
-                "type": "thread",
-                "index": idx,
-                "total": len(scored),
-                "thread": thread,
-            }
+            for fut in done:
+                futures.pop(fut, None)
+                idx += 1
+                try:
+                    thread = fut.result(timeout=0)
+                except Exception as e:  # noqa: BLE001
+                    log(f"draft worker raised: {e}")
+                    continue
+                results.append(thread)
+                yield {
+                    "type": "thread",
+                    "index": idx,
+                    "total": len(scored),
+                    "thread": thread,
+                }
+        # Anything still pending after the deadline gets cancelled and
+        # we ship what we have. Don't wait for them to finish.
+        if futures:
+            timed_out = len(futures)
+            log(f"draft deadline hit; {timed_out} thread(s) abandoned")
+            for fut in futures:
+                fut.cancel()
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -407,11 +449,19 @@ def find_threads_stream(
     # (non-streaming) get a sensible ordering. The streaming UI sorts
     # client-side as items arrive.
     results.sort(key=lambda t: -t["relevance"])
-    yield {
+    done_ev: dict = {
         "type": "done",
         "threads": results,
         "elapsed_seconds": round(time.time() - t_start, 1),
     }
+    if timed_out:
+        done_ev["message"] = (
+            f"Returned {len(results)} thread"
+            f"{'s' if len(results) != 1 else ''}. "
+            f"{timed_out} more timed out and were skipped — "
+            f"the LLM was unusually slow on those. Try again to get the rest."
+        )
+    yield done_ev
 
 
 # ---------------------------------------------------------------------------

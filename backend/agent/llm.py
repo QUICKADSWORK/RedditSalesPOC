@@ -117,6 +117,14 @@ def _anthropic_model() -> str:
     return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 
+# Per-request timeout for LLM calls. Keeps a hung Anthropic / OpenAI
+# request from blocking a worker thread forever. ~60 s is enough for
+# any normal completion at our token sizes; if it runs over, that's
+# almost always a network or rate-limit issue and we'd rather see it
+# now than at 15 minutes in.
+_LLM_TIMEOUT = 60.0
+
+
 def _anthropic_text(system: str, user: str, temperature: float) -> str:
     client = _get_anthropic()
     msg = client.messages.create(
@@ -125,6 +133,7 @@ def _anthropic_text(system: str, user: str, temperature: float) -> str:
         temperature=temperature,
         system=system,
         messages=[{"role": "user", "content": user}],
+        timeout=_LLM_TIMEOUT,
     )
     return _anthropic_join(msg)
 
@@ -146,6 +155,7 @@ def _anthropic_json(system: str, user: str, temperature: float) -> str:
         temperature=temperature,
         system=sys_prompt,
         messages=[{"role": "user", "content": user}],
+        timeout=_LLM_TIMEOUT,
     )
     return _anthropic_join(msg)
 
@@ -192,6 +202,7 @@ def _openai_text(system: str, user: str, temperature: float) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        timeout=_LLM_TIMEOUT,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -206,6 +217,7 @@ def _openai_json(system: str, user: str, temperature: float) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        timeout=_LLM_TIMEOUT,
     )
     return resp.choices[0].message.content or "{}"
 
