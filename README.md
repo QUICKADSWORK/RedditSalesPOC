@@ -72,9 +72,23 @@ It does the same setup and starts the server on
 
 ## Stack
 
-- **Backend**: Python 3.9+, FastAPI, OpenAI (chat completions),
-  PRAW (with a graceful anonymous fallback to reddit.com JSON).
-- **Frontend**: a single static HTML/CSS/JS page served by FastAPI.
+- **Backend**: Python 3.9+, FastAPI.
+  - **LLM provider**: Anthropic Claude (preferred) or OpenAI. Set
+    `ANTHROPIC_API_KEY` to use Claude, or `OPENAI_API_KEY` to fall back
+    to OpenAI. Defaults: `claude-sonnet-4-6` / `gpt-4o-mini`.
+  - **Reddit data source** (pick one):
+    1. **Apify** (`APIFY_TOKEN`) — uses the
+       [trudax/reddit-scraper-lite](https://apify.com/trudax/reddit-scraper-lite)
+       actor. Works from anywhere (including cloud / data-center IPs
+       where reddit.com itself rate-limits hard). Pay-per-result.
+    2. **PRAW** (`REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET`) — Reddit's
+       official API. Free, but requires a residential IP for high
+       throughput.
+    3. **Anonymous reddit.com JSON** — no setup, but blocked from most
+       cloud hosts.
+- **Frontend**: a single static HTML/CSS/JS page served by FastAPI. The
+  status pill in the header tells you exactly which providers are
+  active (`anthropic • apify`, `openai • reddit api`, …).
 
 ```
 backend/

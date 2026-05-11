@@ -17,18 +17,23 @@ const state = {
     const r = await fetch("/api/health");
     const data = await r.json();
     const el = $("#health");
-    if (!data.openai_configured) {
+    const llm = data.llm || {};
+    const rd = data.reddit || {};
+    if (!llm.anthropic_configured && !llm.openai_configured) {
       el.classList.add("warn");
-      el.textContent = "missing OPENAI_API_KEY";
-    } else if (data.reddit_configured) {
+      el.textContent = "missing ANTHROPIC_API_KEY (or OPENAI_API_KEY)";
+    } else if (rd.backend === "apify") {
       el.classList.add("ok");
-      el.textContent = "ready • reddit api";
-    } else if (data.reddit_anon_reachable) {
+      el.textContent = `${llm.provider} • apify`;
+    } else if (rd.backend === "praw") {
       el.classList.add("ok");
-      el.textContent = "ready • anonymous reddit";
+      el.textContent = `${llm.provider} • reddit api`;
+    } else if (rd.anon_reachable) {
+      el.classList.add("ok");
+      el.textContent = `${llm.provider} • anonymous reddit`;
     } else {
       el.classList.add("warn");
-      el.textContent = "reddit blocked here — set REDDIT_CLIENT_ID/SECRET";
+      el.textContent = `${llm.provider} • reddit blocked here — set APIFY_TOKEN`;
     }
   } catch (_e) {
     $("#health").textContent = "offline";
@@ -149,13 +154,14 @@ function renderSubs(subs) {
     name.appendChild(rel);
     card.appendChild(name);
 
+    const subsPart = s.subscribers
+      ? `${formatNumber(s.subscribers)} members · `
+      : "";
     card.appendChild(
       el(
         "div",
         "meta",
-        `${formatNumber(s.subscribers || 0)} members · ${
-          s.audience_fit || s.title || ""
-        }`,
+        `${subsPart}${s.audience_fit || s.title || ""}`,
       ),
     );
     if (s.description) card.appendChild(el("div", "desc", s.description));

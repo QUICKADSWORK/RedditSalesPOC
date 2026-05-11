@@ -97,7 +97,7 @@ else
   ok "dependencies already up to date"
 fi
 
-# --- 4. Make sure .env exists with at least an OPENAI_API_KEY -------------
+# --- 4. Make sure .env exists with at least one LLM key -------------------
 ENV_FILE="$SCRIPT_DIR/backend/.env"
 ENV_EXAMPLE="$SCRIPT_DIR/backend/.env.example"
 if [ ! -f "$ENV_FILE" ]; then
@@ -105,37 +105,48 @@ if [ ! -f "$ENV_FILE" ]; then
   warn "created backend/.env from the example template"
 fi
 
-# Read existing key (if any) without sourcing the file.
 get_env() {
   local key="$1"
   grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true
 }
 
-CURRENT_KEY="$(get_env OPENAI_API_KEY)"
-if [ -z "$CURRENT_KEY" ] || [ "$CURRENT_KEY" = "sk-..." ]; then
-  echo
-  printf "%sOpenAI API key needed.%s Get one at https://platform.openai.com/api-keys\n" "$BOLD" "$RESET_"
-  if [ -t 0 ]; then
-    printf "Paste it now (or press Enter to skip and add it later to backend/.env): "
-    read -r INPUT_KEY
-    if [ -n "$INPUT_KEY" ]; then
-      # Replace or append.
-      if grep -qE "^OPENAI_API_KEY=" "$ENV_FILE"; then
-        # macOS sed needs '' after -i; GNU sed doesn't. Detect.
-        if sed --version >/dev/null 2>&1; then
-          sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${INPUT_KEY}|" "$ENV_FILE"
-        else
-          sed -i '' "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${INPUT_KEY}|" "$ENV_FILE"
-        fi
-      else
-        printf "\nOPENAI_API_KEY=%s\n" "$INPUT_KEY" >> "$ENV_FILE"
-      fi
-      ok "saved OPENAI_API_KEY to backend/.env"
+set_env() {
+  local key="$1" val="$2"
+  if grep -qE "^${key}=" "$ENV_FILE"; then
+    if sed --version >/dev/null 2>&1; then
+      sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
     else
-      warn "no key entered — the UI will load but Analyze will fail until you set OPENAI_API_KEY in backend/.env"
+      sed -i '' "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
     fi
   else
-    warn "non-interactive shell; edit backend/.env and add your OPENAI_API_KEY"
+    printf "\n%s=%s\n" "$key" "$val" >> "$ENV_FILE"
+  fi
+}
+
+ANTHROPIC_KEY="$(get_env ANTHROPIC_API_KEY)"
+OPENAI_KEY="$(get_env OPENAI_API_KEY)"
+if [ -z "$ANTHROPIC_KEY" ] && { [ -z "$OPENAI_KEY" ] || [ "$OPENAI_KEY" = "sk-..." ]; }; then
+  echo
+  printf "%sLLM API key needed.%s\n" "$BOLD" "$RESET_"
+  printf "  Anthropic (preferred): https://console.anthropic.com/settings/keys\n"
+  printf "  OpenAI fallback:       https://platform.openai.com/api-keys\n"
+  if [ -t 0 ]; then
+    printf "Paste a key now (sk-ant-... or sk-..., Enter to skip): "
+    read -r INPUT_KEY
+    if [ -n "$INPUT_KEY" ]; then
+      case "$INPUT_KEY" in
+        sk-ant-*) set_env ANTHROPIC_API_KEY "$INPUT_KEY"
+                  ok "saved ANTHROPIC_API_KEY to backend/.env" ;;
+        sk-*)     set_env OPENAI_API_KEY "$INPUT_KEY"
+                  ok "saved OPENAI_API_KEY to backend/.env" ;;
+        *)        warn "unrecognized key prefix; saving as ANTHROPIC_API_KEY"
+                  set_env ANTHROPIC_API_KEY "$INPUT_KEY" ;;
+      esac
+    else
+      warn "no key entered — the UI will load but Analyze will fail until you add one to backend/.env"
+    fi
+  else
+    warn "non-interactive shell; edit backend/.env and add ANTHROPIC_API_KEY (or OPENAI_API_KEY)"
   fi
 fi
 

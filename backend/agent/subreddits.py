@@ -77,33 +77,43 @@ def recommend_subreddits(profile: dict, *, max_results: int = 12) -> list[dict]:
             continue
         if info.get("over_18"):
             continue
-        if (info.get("subscribers") or 0) < 1000:
+        # In Apify mode (info["_unverified"] == True) we don't have
+        # subscriber counts, so we can't filter on size. We keep every
+        # candidate the LLM proposed and let the ranker prune the list.
+        if not info.get("_unverified") and (info.get("subscribers") or 0) < 1000:
             continue
         enriched.append({**info, "why": cand.get("why", "")})
 
     if not enriched:
         return []
 
-    listing = "\n".join(
-        f"- r/{s['name']} | subs={s['subscribers']} | {s['title']} :: "
-        f"{(s['description'] or '')[:200]}"
-        for s in enriched[:30]
-    )
+    def _line(s: dict) -> str:
+        subs = s.get("subscribers") or 0
+        subs_part = f"subs={subs}" if subs else "subs=?"
+        return (
+            f"- r/{s['name']} | {subs_part} | {s.get('title', '')} :: "
+            f"{(s.get('description') or s.get('why') or '')[:200]}"
+        )
+
+    listing = "\n".join(_line(s) for s in enriched[:30])
     rank_user = (
         f"Business one-liner: {profile.get('one_liner')}\n"
         f"Audience: {profile.get('target_audience')}\n"
         f"Pains solved: {profile.get('pain_points')}\n\n"
         f"Subreddits to score:\n{listing}"
     )
+    def _norm(n: str) -> str:
+        return (n or "").strip().lstrip("/").removeprefix("r/").lower()
+
     try:
         ranked = llm.chat_json(_RANK_SYSTEM, rank_user, temperature=0.2)
-        ranking = {r["name"].lower(): r for r in ranked.get("ranked", [])}
+        ranking = {_norm(r.get("name", "")): r for r in ranked.get("ranked", [])}
     except Exception:
         ranking = {}
 
     out: list[dict] = []
     for s in enriched:
-        meta = ranking.get(s["name"].lower(), {})
+        meta = ranking.get(_norm(s["name"]), {})
         out.append(
             {
                 **s,

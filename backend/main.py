@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 # Load .env before importing modules that read env vars at import time.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from agent import llm as llm_mod  # noqa: E402
 from agent import posts as posts_mod  # noqa: E402
 from agent import reddit_client  # noqa: E402
 from agent import subreddits as subs_mod  # noqa: E402
@@ -46,7 +47,7 @@ class ThreadsBody(BaseModel):
     subreddits: list[str]
     replies_per_thread: int = Field(3, ge=2, le=4)
     max_threads: int = 8
-    min_relevance: int = 55
+    min_relevance: int = 35
 
 
 class PostsBody(BaseModel):
@@ -64,7 +65,6 @@ def _real_key(name: str) -> bool:
     val = (os.getenv(name) or "").strip()
     if not val:
         return False
-    # Common placeholders we should not treat as real.
     if val.startswith("sk-...") or val in {"sk-...", "your-key-here", "changeme"}:
         return False
     return True
@@ -72,16 +72,26 @@ def _real_key(name: str) -> bool:
 
 @app.get("/api/health")
 def health() -> dict:
-    reddit_configured = _real_key("REDDIT_CLIENT_ID") and _real_key(
-        "REDDIT_CLIENT_SECRET"
-    )
+    backend = reddit_client.current_backend()
+    provider = llm_mod.current_provider()
     return {
         "ok": True,
-        "openai_configured": _real_key("OPENAI_API_KEY"),
-        "reddit_configured": reddit_configured,
-        "reddit_anon_reachable": (
-            True if reddit_configured else reddit_client.anon_reachable()
-        ),
+        "llm": {
+            "provider": provider["name"],
+            "model": provider["model"],
+            "anthropic_configured": _real_key("ANTHROPIC_API_KEY"),
+            "openai_configured": _real_key("OPENAI_API_KEY"),
+        },
+        "reddit": {
+            "backend": backend,
+            "apify_configured": _real_key("APIFY_TOKEN"),
+            "praw_configured": (
+                _real_key("REDDIT_CLIENT_ID") and _real_key("REDDIT_CLIENT_SECRET")
+            ),
+            "anon_reachable": (
+                True if backend != "anon" else reddit_client.anon_reachable()
+            ),
+        },
     }
 
 
