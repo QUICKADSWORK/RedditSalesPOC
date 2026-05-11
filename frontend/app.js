@@ -244,7 +244,7 @@ $("#threads-btn").addEventListener("click", async () => {
     replies_per_thread: 3,
     max_threads: 25,
     min_relevance: 10,
-    max_wait_seconds: 240,
+    max_wait_seconds: 180,
   };
 
   const section = $("#threads-section");

@@ -322,21 +322,25 @@ def _apify_run(
                 continue
             peek_counter += 1
             new_count = last_item_count
-            # Peek dataset every ~9 s (every 3 polls at 3 s) to limit
-            # extra API hits.
-            if peek_counter % 3 == 0:
-                try:
-                    head = c.get(
-                        f"{_APIFY_BASE}/datasets/{dataset_id}/items"
-                        f"?token={token}&format=json&limit=0&clean=true"
-                    )
-                    # The X-Total-Count response header is the cheapest
-                    # source of dataset size without fetching items.
-                    new_count = int(
-                        head.headers.get("X-Total-Count") or last_item_count
-                    )
-                except Exception:
-                    pass
+            # Peek dataset on every poll so the user sees the count tick
+            # up in real time. We use limit=1 so the response stays
+            # tiny -- the count we want is in the headers regardless.
+            try:
+                head = c.get(
+                    f"{_APIFY_BASE}/datasets/{dataset_id}/items"
+                    f"?token={token}&limit=1&clean=true"
+                )
+                hdrs = head.headers
+                # Apify uses lowercase 'x-apify-pagination-total' for
+                # the total item count in the dataset.
+                total_str = (
+                    hdrs.get("x-apify-pagination-total")
+                    or hdrs.get("X-Apify-Pagination-Total")
+                )
+                if total_str is not None:
+                    new_count = int(total_str)
+            except Exception:
+                pass
             if (new_status != status or new_count != last_item_count) and on_status:
                 try:
                     on_status(

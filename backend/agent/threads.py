@@ -97,12 +97,12 @@ def find_threads(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 12,
+    per_sub: int = 8,
     total_limit: int = 25,
     replies_per_thread: int = 3,
     min_relevance: int = 10,
     max_age_days: int = 45,
-    max_wait_seconds: float = 240.0,
+    max_wait_seconds: float = 180.0,
 ) -> list[dict]:
     """Blocking version. Use find_threads_stream for SSE."""
     final: dict = {"threads": []}
@@ -128,12 +128,12 @@ def find_threads_stream(
     profile: dict,
     subreddits: list[str],
     *,
-    per_sub: int = 12,
+    per_sub: int = 8,
     total_limit: int = 25,
     replies_per_thread: int = 3,
     min_relevance: int = 10,
     max_age_days: int = 45,
-    max_wait_seconds: float = 240.0,
+    max_wait_seconds: float = 180.0,
     draft_concurrency: int = 4,
 ) -> Iterator[dict]:
     """Yield progress events as the search runs. The final event is

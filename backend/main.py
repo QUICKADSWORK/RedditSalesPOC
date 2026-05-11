@@ -70,7 +70,7 @@ class ThreadsBody(BaseModel):
     replies_per_thread: int = Field(3, ge=2, le=4)
     max_threads: int = 25
     min_relevance: int = 10
-    max_wait_seconds: int = Field(240, ge=30, le=600)
+    max_wait_seconds: int = Field(180, ge=30, le=600)
 
 
 class PostsBody(BaseModel):
